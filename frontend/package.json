@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@next/third-parties": "^16.2.10",
-    "lucide-react": "^1.16.0",
+    "lucide-react": "^1.42.0",
     "motion": "^12.42.2",
     "next": "16.2.6",
     "react": "^19",
