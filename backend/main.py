@@ -1,0 +1,38 @@
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from config import settings, validate_startup_security, ensure_secret_key, is_production
+from routers.scan import router as scan_router
+from routers.report import router as report_router
+from routers.verify import router as verify_router
+from routers.auth import router as auth_router
+from routers.configs import router as configs_router
+from routers.training import router as training_router
+
+# Refuse to boot with default secrets in a production posture (no-op warning for
+# local self-hosted). Runs at import so uvicorn/gunicorn can't skip it.
+ensure_secret_key()
+validate_startup_security()
+
+app = FastAPI(
+    title="ONUS VAPT API",
+    description="ONUS - Automated Vulnerability Assessment and Penetration Testing",
+    version="1.0.0",
+    # L1: no interactive docs / schema disclosure in a production posture.
+    **({"docs_url": None, "redoc_url": None, "openapi_url": None} if is_production() else {}),
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(scan_router)
+app.include_router(report_router)
+app.include_router(verify_router)
+app.include_router(auth_router)
+app.include_router(configs_router)
+app.include_router(training_router)

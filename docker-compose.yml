@@ -1,0 +1,384 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: vapt
+      POSTGRES_USER: vapt
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vapt_secure_2025}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vapt -d vapt"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # AOF persistence so a restart/redeploy doesn't drop Celery task state,
+    # rate-limit counters, or (hosted) sessions. everysec = durable without the
+    # fsync-per-write latency of 'always'.
+    command: redis-server --appendonly yes --appendfsync everysec
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  zap:
+    image: zaproxy/zap-stable:latest
+    restart: unless-stopped
+    command: zap.sh -daemon -host 0.0.0.0 -port 8090 -config api.disablekey=true -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/JSON/core/view/version/"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    volumes:
+      - ./zap-sessions:/home/zap/.ZAP/session
+      # Script-based auth (webscan.py's ZAP setup) - loaded via
+      # zap.script.load() at scan time, read-only since ZAP only reads it.
+      - ./zap-scripts:/zap-scripts:ro
+    mem_limit: 4g
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      # 'full' = base backend + all scanner binaries, for local SCANNER_BACKEND=
+      # local. Production (the DigitalOcean droplet, x86_64) builds the slim
+      # 'backend' target instead — see docker-compose.prod.yml.
+      target: full
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      zap:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://vapt:${POSTGRES_PASSWORD:-vapt_secure_2025}@postgres:5432/vapt
+      REDIS_URL: redis://redis:6379/0
+      OLLAMA_URL: http://host.docker.internal:11434
+      ZAP_URL: http://zap:8090
+      SECRET_KEY: ${SECRET_KEY:-change_me_in_production}
+      ALLOWED_HOSTS: localhost,127.0.0.1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/subfinder-config/provider-config.yaml:/root/.config/subfinder/provider-config.yaml:ro
+    command: >
+      sh -c "cd /app && alembic upgrade head &&
+             cd /app/backend && uvicorn main:app --host 0.0.0.0 --port 8000"
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: full
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://vapt:${POSTGRES_PASSWORD:-vapt_secure_2025}@postgres:5432/vapt
+      REDIS_URL: redis://redis:6379/0
+      OLLAMA_URL: http://host.docker.internal:11434
+      ZAP_URL: http://zap:8090
+      # The worker runs validate_startup_security() via tasks/celery_app.py, the
+      # same guard the API runs. Without SECRET_KEY here it saw the placeholder
+      # default and refused to start whenever REQUIRE_AUTH=true - a crash loop
+      # in which no scan ever leaves the queue, because nothing consumes it.
+      SECRET_KEY: ${SECRET_KEY:-change_me_in_production}
+      # Same host dir the zap service writes session data to (below) - lets
+      # _finalize() prune a completed scan's session files. Read-write since
+      # pruning deletes files; matches config.py's ZAP_SESSIONS_DIR default.
+      ZAP_SESSIONS_DIR: /zap-sessions
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./backend/subfinder-config/provider-config.yaml:/root/.config/subfinder/provider-config.yaml:ro
+      - ./zap-sessions:/zap-sessions
+    command: celery -A tasks.celery_app worker --loglevel=info -c 5
+
+  # --- Local-only, self-hosted validation targets (ARCHITECTURE.md §8) ---
+  # Intentionally-vulnerable practice apps, not internet services - no ToS/
+  # authorization concerns since we own and run the container ourselves.
+  # Reachable from backend/worker via the aliases below (Docker's embedded
+  # DNS), and from the host browser via the published ports for manual
+  # comparison against the scan report.
+  # Gated behind the "targets" Compose profile (`docker compose --profile
+  # targets up -d`) so a plain `docker compose up -d` on a fresh clone only
+  # builds/starts the 6 core app services - nodegoat/dvwp-wordpress below
+  # build from ./nodegoat-src/./dvwp-src, which don't exist until cloned
+  # separately (see README's "Optional: practice targets" section).
+  juice-shop:
+    image: bkimminich/juice-shop
+    restart: unless-stopped
+    profiles: ["targets"]
+    # Juice Shop's default port (3000) isn't 80/443, and the VAPT tool's
+    # `domain` field intentionally has no port slot (Section 3 schema treats
+    # it as a bare hostname) - every scanning module assumes 80/443. PORT=80
+    # makes the app itself listen where the tool expects it, matching how a
+    # real-world target normally looks, rather than teaching the tool a
+    # port-per-domain concept it doesn't have.
+    environment:
+      PORT: "80"
+    networks:
+      default:
+        aliases:
+          - juiceshop.local
+    ports:
+      - "3001:80"
+
+  dvwa:
+    image: vulnerables/web-dvwa
+    restart: unless-stopped
+    profiles: ["targets"]
+    networks:
+      default:
+        aliases:
+          - dvwa.local
+    ports:
+      - "8081:80"
+
+  bwapp:
+    image: raesene/bwapp
+    restart: unless-stopped
+    profiles: ["targets"]
+    # Self-contained image (Apache+MySQL via supervisord in one container,
+    # already listening on :80) - no separate DB sidecar or PORT remap
+    # needed, unlike webgoat/juice-shop above.
+    networks:
+      default:
+        aliases:
+          - bwapp.local
+    ports:
+      - "8083:80"
+
+  mutillidae:
+    image: citizenstig/nowasp
+    restart: unless-stopped
+    profiles: ["targets"]
+    # Self-contained image (tutum/lamp-based - Apache+MySQL in one container,
+    # already listening on :80) - no separate DB sidecar needed, same pattern
+    # as bwapp above (practicality_test_plan.md's original note assumed a
+    # sidecar was required; this image makes that unnecessary).
+    networks:
+      default:
+        aliases:
+          - mutillidae.local
+    ports:
+      - "8084:80"
+
+  nodegoat-mongo:
+    image: mongo:4.4
+    restart: unless-stopped
+    profiles: ["targets"]
+    user: mongodb
+    networks:
+      default:
+        aliases:
+          - nodegoat-mongo
+
+  nodegoat:
+    build:
+      context: ./nodegoat-src
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    profiles: ["targets"]
+    # No prebuilt image exists - the published `vulnerables/web-owasp-
+    # nodegoat` Docker Hub repo has zero pushed tags - so this builds from
+    # the vendored source in ./nodegoat-src (gitignored, `git clone
+    # github.com/OWASP/NodeGoat`), using OWASP's own Dockerfile/compose
+    # pattern verbatim (command, Mongo wait-loop, db-reset). PORT=80 +
+    # NET_BIND_SERVICE for the same bare-root/port reason as webgoat/
+    # juice-shop above - the Dockerfile's non-root `node` user can't bind
+    # :80 without the capability.
+    cap_add:
+      - NET_BIND_SERVICE
+    environment:
+      PORT: "80"
+      MONGODB_URI: mongodb://nodegoat-mongo:27017/nodegoat
+    command: sh -c "until nc -z -w 2 nodegoat-mongo 27017; do sleep 2; done && node artifacts/db-reset.js && npm start"
+    depends_on:
+      - nodegoat-mongo
+    networks:
+      default:
+        aliases:
+          - nodegoat.local
+    ports:
+      - "8085:80"
+
+  # DVWP (Damn Vulnerable WordPress, github.com/vavkamil/dvwp - vendored into
+  # ./dvwp-src same as nodegoat-src above) behind an OWASP ModSecurity/CRS
+  # reverse proxy. Closes 3 real coverage gaps found in this tool's own
+  # practicality testing (docs/test_findings.md): ssl_tls/tech_fingerprint
+  # had never seen a real TLS handshake or a real WAF (every prior target was
+  # plain HTTP, unprotected), and nuclei had found 0 findings across every
+  # scan this whole phase - DVWP ships genuinely outdated WordPress plugins
+  # (social-warfare, wp-file-upload, etc.) with known CVEs nuclei's
+  # WordPress-template category should match. dvwp-wordpress has no host
+  # port and no plain-HTTP alias - reachable only through the WAF/TLS proxy,
+  # which is the entire point of this target.
+  dvwp-mysql:
+    image: mysql:5.7
+    restart: unless-stopped
+    profiles: ["targets"]
+    environment:
+      MYSQL_ROOT_PASSWORD: password
+    networks:
+      default:
+        aliases:
+          - dvwp-mysql
+
+  dvwp-wordpress:
+    build:
+      context: ./dvwp-src
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    profiles: ["targets"]
+    depends_on:
+      - dvwp-mysql
+    environment:
+      WORDPRESS_DB_HOST: dvwp-mysql
+      WORDPRESS_DB_PASSWORD: password
+    volumes:
+      - dvwp_wp:/var/www/html
+    # dvwp-direct.local (in addition to the plain container-name DNS entry,
+    # which validators.domain() rejects for having no dot) - lets one control
+    # scan hit WordPress unobstructed, to isolate "nuclei/whatweb's own logic
+    # is broken" from "the WAF in front is correctly blocking active probes"
+    # (real, confirmed distinction found in this pass - see test_findings.md).
+    networks:
+      default:
+        aliases:
+          - dvwp-direct.local
+          - dvwp-wordpress
+
+  dvwp-setup:
+    # One-shot: installs WP core + activates DVWP's bundled vulnerable
+    # plugins, then exits - same wp-cli pattern as DVWP's own compose file.
+    image: wordpress:cli-php7.1
+    profiles: ["targets"]
+    depends_on:
+      - dvwp-wordpress
+    environment:
+      WORDPRESS_DB_HOST: dvwp-mysql
+      WORDPRESS_DB_PASSWORD: password
+    volumes:
+      - dvwp_wp:/var/www/html
+      - ./dvwp-src/bin/install-wp.sh:/usr/local/bin/install-wp:ro
+    entrypoint: sh -c "sleep 15 && sed 's#127.0.0.1:31337#dvwp.local#' /usr/local/bin/install-wp | sh"
+    networks:
+      default:
+
+  dvwp-waf:
+    image: owasp/modsecurity-crs:nginx-alpine
+    restart: unless-stopped
+    profiles: ["targets"]
+    depends_on:
+      - dvwp-wordpress
+    # Runs as an unprivileged user by default - can't bind :80/:443 without
+    # this, same reasoning as webgoat/nodegoat above. Needed here (rather
+    # than remapping to a high port) because ssl_tls.py hardcodes checking
+    # domain:443 directly. The image's own entrypoint additionally hard-
+    # blocks PORT/SSL_PORT<1024 with a static check unconditioned on actual
+    # capabilities - neutralized by bind-mounting a no-op over that one
+    # check script.
+    cap_add:
+      - NET_BIND_SERVICE
+    volumes:
+      - ./dvwp-src/noop.sh:/docker-entrypoint.d/01-check-low-port.sh:ro
+    environment:
+      BACKEND: http://dvwp-wordpress:80
+      PORT: "80"
+      SSL_PORT: "443"
+    networks:
+      default:
+        aliases:
+          - dvwp.local
+    ports:
+      - "8444:443"
+
+  metasploitable2:
+    image: tleemcjr/metasploitable2
+    restart: unless-stopped
+    profiles: ["targets"]
+    # Deliberately vulnerable multi-service Linux host (vsftpd backdoor, Samba,
+    # Telnet, RPC, MySQL, PostgreSQL, VNC, X11, HTTP), not a single web app -
+    # unlike the other targets above, intentionally NOT publishing any host
+    # port here: these are real backdoored/unauthenticated network services,
+    # not just an HTTP app, so host-network exposure isn't needed (the
+    # backend/worker containers reach every port via the alias below over
+    # Docker's internal network already) and is avoided as a precaution.
+    # tty/stdin_open (compose's `-it` equivalent): the image's CMD is
+    # `services.sh && bash` - a bare `bash` with no controlling tty/stdin
+    # exits immediately (EOF), which without this looped restart: unless-
+    # stopped every few seconds and never left the services up long enough
+    # to scan.
+    tty: true
+    stdin_open: true
+    networks:
+      default:
+        aliases:
+          - metasploitable.local
+
+  webgoat:
+    image: webgoat/webgoat
+    restart: unless-stopped
+    profiles: ["targets"]
+    # WebGoat's Spring Boot app defaults to port 8080 under context path
+    # /WebGoat (and can't bind :80 as its non-root `webgoat` user without
+    # this capability) - both overridden here so it lands on the bare
+    # root/port shape every scanning module assumes, same reasoning as
+    # juice-shop's PORT=80 above. WEBWOLF_PORT is left at its own default
+    # (9090) - only WebGoat's own port/context needed remapping.
+    cap_add:
+      - NET_BIND_SERVICE
+    environment:
+      WEBGOAT_PORT: "80"
+      WEBGOAT_CONTEXT: "/"
+    networks:
+      default:
+        aliases:
+          - webgoat.local
+    ports:
+      - "8082:80"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      # next.config.mjs's rewrites() is baked into routes-manifest.json at
+      # `next build` time, not re-read at container runtime - so this must
+      # be a build arg, not just a runtime `environment:` entry (which is
+      # also kept below, harmlessly, for any future runtime-read usage).
+      args:
+        NEXT_INTERNAL_API_URL: http://backend:8000
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      NEXT_INTERNAL_API_URL: http://backend:8000
+    ports:
+      - "3000:3000"
+
+volumes:
+  postgres_data:
+  redis_data:     # Redis AOF file (append-only persistence, see redis service)
+  ollama_data:    # kept for a future containerized-Ollama migration; unused while Ollama runs natively
+  dvwp_wp:

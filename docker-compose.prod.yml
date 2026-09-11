@@ -1,0 +1,110 @@
+# DigitalOcean Droplet (x86_64) production stack.
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Postgres + Redis are PRIVATE (no published ports). Only the backend's :8000
+# is exposed - put TLS (Caddy/nginx/Cloudflare Tunnel) in front of it.
+# Scanners + LLM run on Modal (SCANNER_BACKEND=modal); there is no ZAP sidecar.
+#
+# Provide these via a .env file next to this compose (never commit it):
+#   POSTGRES_PASSWORD, OLLAMA_AUTH_TOKEN, MODAL_TOKEN_ID, MODAL_TOKEN_SECRET,
+#   CORS_ORIGINS, OLLAMA_URL
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: vapt
+      POSTGRES_USER: vapt
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vapt -d vapt"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # NO ports: - reachable only on the internal compose network.
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # AOF persistence: a droplet redeploy/crash must not log out every hosted
+    # session or drop in-flight queue/rate-limit state. everysec = durable
+    # without per-write fsync latency.
+    command: redis-server --appendonly yes --appendfsync everysec
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    # NO ports: - private.
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: backend          # slim image, no scanner binaries
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    environment:
+      # Celery (esp. the threads pool) doesn't add cwd to sys.path the way
+      # uvicorn does - set it explicitly so the worker resolves `database`,
+      # `config`, `tasks.*`, etc.
+      PYTHONPATH: /app/backend
+      SCANNER_BACKEND: modal
+      MODAL_APP_NAME: onus-scanners
+      OLLAMA_URL: ${OLLAMA_URL}
+      OLLAMA_AUTH_TOKEN: ${OLLAMA_AUTH_TOKEN}
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      GITHUB_MODELS_TOKEN: ${GITHUB_MODELS_TOKEN:-}
+      MODAL_TOKEN_ID: ${MODAL_TOKEN_ID}
+      MODAL_TOKEN_SECRET: ${MODAL_TOKEN_SECRET}
+      DATABASE_URL: postgresql://vapt:${POSTGRES_PASSWORD}@postgres:5432/vapt
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:?set a strong SECRET_KEY in .env (python -c "import secrets; print(secrets.token_urlsafe(48))")}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      MAX_CONCURRENT_SCANS: 3
+    ports:
+      - "8000:8000"            # the ONLY public port - front it with TLS
+    command: >
+      sh -c "cd /app && alembic upgrade head &&
+             cd /app/backend && uvicorn main:app --host 0.0.0.0 --port 8000"
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: backend
+    restart: unless-stopped
+    depends_on:
+      backend: { condition: service_started }
+    environment:
+      # Celery (esp. the threads pool) doesn't add cwd to sys.path the way
+      # uvicorn does - set it explicitly so the worker resolves `database`,
+      # `config`, `tasks.*`, etc.
+      PYTHONPATH: /app/backend
+      SCANNER_BACKEND: modal
+      MODAL_APP_NAME: onus-scanners
+      OLLAMA_URL: ${OLLAMA_URL}
+      OLLAMA_AUTH_TOKEN: ${OLLAMA_AUTH_TOKEN}
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      GITHUB_MODELS_TOKEN: ${GITHUB_MODELS_TOKEN:-}
+      MODAL_TOKEN_ID: ${MODAL_TOKEN_ID}
+      MODAL_TOKEN_SECRET: ${MODAL_TOKEN_SECRET}
+      DATABASE_URL: postgresql://vapt:${POSTGRES_PASSWORD}@postgres:5432/vapt
+      REDIS_URL: redis://redis:6379/0
+      # Same secret as the backend — the worker runs the same startup security
+      # check and must not fall back to the weak default in a production posture.
+      SECRET_KEY: ${SECRET_KEY:?set a strong SECRET_KEY in .env (python -c "import secrets; print(secrets.token_urlsafe(48))")}
+      MAX_CONCURRENT_SCANS: 3
+    # Threads pool (NOT gevent - gevent breaks the Playwright verifier). Dispatch
+    # to Modal is I/O-bound, so high concurrency is cheap.
+    command: celery -A tasks.celery_app worker -P threads -c 40 --loglevel=info
+
+volumes:
+  postgres_data:
+  redis_data:
