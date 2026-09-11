@@ -11,4 +11,4 @@ pytest>=8.0
 pdfplumber>=0.11
 # Auth tests inject a fake Redis into the OTP/session helpers (security.py) so
 # CI needs no live Redis.
-fakeredis>=2.20
+fakeredis>=2.37.1
