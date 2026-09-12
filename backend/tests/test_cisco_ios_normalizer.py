@@ -69,7 +69,8 @@ class TestCiscoIOSNormalizer:
         assert config.service_hardening.http_server_disabled is True
         assert config.ssh.version == 2
         assert config.ssh.timeout_seconds == 60
-        assert config.line_console.exec_timeout_minutes == 330
+        assert config.line_console.exec_timeout_minutes == 5.5
+        assert config.line_vty.exec_timeout_minutes == 10
         assert config.line_vty.transport_input == ["ssh"]
         assert config.line_vty.access_class == "MGMT-ONLY in"
         assert config.aaa.authentication_login == "default group radius local"
@@ -129,6 +130,40 @@ line vty 0 15
 """)
         assert result.config.device_info.domain_name == "corp.example"
         assert result.config.ssh.timeout_seconds == 45
-        assert result.config.line_console.exec_timeout_minutes == 420
+        assert result.config.line_console.exec_timeout_minutes == 7
         assert result.config.line_vty.transport_input == ["telnet", "ssh"]
         assert result.config.to_dict()["ssh"]["timeout_seconds"] == 45
+
+    def test_exec_timeout_uses_cisco_minutes_and_seconds_in_console_and_vty(self):
+        result = CiscoIOSNormalizer().parse("""line console 0
+ exec-timeout 10 0
+!
+line vty 0 15
+ exec-timeout 5 30
+""")
+
+        assert result.config.line_console.exec_timeout_minutes == 10
+        assert result.config.line_vty.exec_timeout_minutes == 5.5
+        assert _find(result, "line_console.exec_timeout_minutes")[0].field_value == 10
+        assert _find(result, "line_vty.exec_timeout_minutes")[0].field_value == 5.5
+
+    def test_explicit_enabled_services_are_confirmed_failing_evidence(self):
+        result = CiscoIOSNormalizer().parse("""service finger
+service tcp-small-servers
+service udp-small-servers
+ip bootp server
+ip http server
+no ip http secure-server
+ip source-route
+cdp run
+""")
+
+        assert result.unknown_lines == []
+        assert result.config.service_hardening.finger_disabled is False
+        assert result.config.service_hardening.tcp_small_servers_disabled is False
+        assert result.config.service_hardening.udp_small_servers_disabled is False
+        assert result.config.service_hardening.bootp_server_disabled is False
+        assert result.config.service_hardening.http_server_disabled is False
+        assert result.config.service_hardening.http_secure_server_enabled is False
+        assert result.config.access_control.source_route_disabled is False
+        assert result.config.cdp.global_disabled is False

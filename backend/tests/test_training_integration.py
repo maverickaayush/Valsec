@@ -165,7 +165,7 @@ class TestOllamaUnavailableDegradation:
         from training.matcher import classify_with_ollama
 
         # When Ollama is unavailable, should return None (graceful degradation)
-        with patch("training.matcher._call_ollama", return_value=None):
+        with patch("training.matcher.propose_config_mappings", return_value={}):
             result = classify_with_ollama(
                 vendor="cisco",
                 raw_line="unknown-command value",

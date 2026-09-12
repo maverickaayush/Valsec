@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<title>Valsec Compliance Report — {{ device_name }}</title>
+<style>
+  :root { --bg:#060807; --panel:#0d120f; --line:#26352b; --green:#00e599; --text:#eef5ef; --muted:#91a096; --red:#ff7676; --amber:#d7b85f; }
+  @page {
+    size:A4; margin:1.5cm 1.4cm 1.8cm;
+    background:var(--bg);
+    @bottom-center { content:"Valsec Compliance Report · Confidential · Page " counter(page) " of " counter(pages); color:#66736a; font:7pt monospace; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:9pt/1.5 "DejaVu Sans",Arial,sans-serif; }
+  h1,h2,h3,p { margin-top:0; }
+  h1 { font-size:23pt; letter-spacing:-.04em; text-transform:uppercase; margin-bottom:6px; }
+  h2 { margin:25px 0 12px; padding-bottom:7px; border-bottom:1px solid var(--line); color:var(--green); font-size:11pt; letter-spacing:.13em; text-transform:uppercase; }
+  .mono,code,pre { font-family:"DejaVu Sans Mono",monospace; }
+  .cover { min-height:24cm; page-break-after:always; padding-top:34px; }
+  .brand { color:var(--green); font:bold 28pt monospace; letter-spacing:.25em; margin-bottom:55px; }
+  .subtitle { color:var(--muted); text-transform:uppercase; letter-spacing:.2em; margin-bottom:10px; }
+  .device { color:var(--green); font:bold 19pt monospace; margin:25px 0 35px; }
+  .identity,.summary { display:grid; grid-template-columns:repeat(2,1fr); gap:1px; border:1px solid var(--line); background:var(--line); }
+  .identity div,.summary div { background:var(--panel); padding:12px; }
+  .identity span,.summary span { display:block; color:var(--muted); font:7pt monospace; letter-spacing:.1em; text-transform:uppercase; margin-bottom:5px; }
+  .identity b { font:9pt monospace; }
+  .score { margin:34px 0 8px; color:var(--green); font:bold 42pt monospace; }
+  .score-label { color:var(--muted); text-transform:uppercase; letter-spacing:.18em; }
+  .summary { grid-template-columns:repeat(4,1fr); margin-bottom:14px; }
+  .summary b { font:bold 18pt monospace; }
+  .summary .fail b { color:var(--red); }
+  .principle { border-left:3px solid var(--green); background:var(--panel); padding:12px 15px; color:var(--muted); }
+  .principle b { color:var(--text); }
+  table { width:100%; border-collapse:collapse; }
+  th { color:var(--muted); font:7pt monospace; text-align:left; letter-spacing:.08em; padding:7px; border-bottom:1px solid var(--line); }
+  td { padding:8px 7px; border-bottom:1px solid var(--line); vertical-align:top; }
+  .badge { display:inline-block; border:1px solid currentColor; padding:2px 6px; font:bold 7pt monospace; }
+  .PASS { color:var(--green); } .FAIL { color:var(--red); } .NOT_APPLICABLE { color:var(--muted); }
+  .sev-Critical,.sev-High { color:var(--red); } .sev-Medium { color:var(--amber); } .sev-Low,.sev-Informational { color:var(--green); }
+  .control { page-break-inside:avoid; margin:0 0 14px; border:1px solid var(--line); background:var(--panel); }
+  .control-head { display:table; width:100%; padding:10px 12px; border-bottom:1px solid var(--line); }
+  .control-title { display:table-cell; }
+  .control-title b { color:var(--green); font-family:monospace; margin-right:7px; }
+  .control-tags { display:table-cell; width:145px; text-align:right; }
+  .control-body { padding:11px 12px; }
+  .label { color:var(--muted); font:7pt monospace; letter-spacing:.1em; text-transform:uppercase; margin:9px 0 4px; }
+  .observed { border:1px solid var(--line); background:#050705; padding:8px 10px; white-space:pre-wrap; word-break:break-word; }
+  .remediation { border-left:3px solid var(--green); background:#07100a; padding:9px 11px; color:#baf6ca; white-space:pre-wrap; word-break:break-word; }
+  .fallback { color:var(--amber); border:1px solid var(--amber); padding:5px 8px; margin-bottom:7px; font:bold 7pt monospace; text-transform:uppercase; }
+  .no-remediation { color:var(--muted); font-style:italic; }
+</style>
+</head>
+<body>
+  <section class="cover">
+    <div class="brand">VALSEC</div>
+    <div class="subtitle">{{ vendor }} {{ os_type }} Security Compliance Audit</div>
+    <h1>Configuration Compliance Report</h1>
+    <div class="device">{{ device_name }}</div>
+    <div class="identity">
+      <div><span>Vendor</span><b>{{ vendor }}</b></div>
+      <div><span>Operating system</span><b>{{ os_type }}</b></div>
+      <div><span>Firmware</span><b>{{ firmware_version }}</b></div>
+      <div><span>Completed</span><b>{{ completed_at }}</b></div>
+      <div><span>Benchmark</span><b>{{ framework }}</b></div>
+      <div><span>Benchmark version</span><b>{{ framework_version }}</b></div>
+    </div>
+    <div class="score">{{ "%.2f"|format(compliance_score) }}%</div>
+    <div class="score-label">Overall compliance score</div>
+  </section>
+
+  <section>
+    <h2>Compliance Summary</h2>
+    <div class="summary">
+      <div><span>Score</span><b>{{ "%.2f"|format(compliance_score) }}%</b></div>
+      <div><span>Pass</span><b>{{ total_passed }}</b></div>
+      <div class="fail"><span>Fail</span><b>{{ total_failed }}</b></div>
+      <div><span>Not applicable</span><b>{{ total_na }}</b></div>
+    </div>
+    <div class="principle"><b>Evaluation integrity:</b> classification assistance may propose schema mappings. Every PASS, FAIL, and N/A verdict in this report was produced by the {{ evaluation_engine }}.</div>
+
+    <h2>Failed Controls by Severity</h2>
+    <table>
+      <thead><tr><th>CRITICAL</th><th>HIGH</th><th>MEDIUM</th><th>LOW</th><th>INFORMATIONAL</th></tr></thead>
+      <tbody><tr><td>{{ severity_counts.Critical }}</td><td>{{ severity_counts.High }}</td><td>{{ severity_counts.Medium }}</td><td>{{ severity_counts.Low }}</td><td>{{ severity_counts.Informational }}</td></tr></tbody>
+    </table>
+
+    <h2>Control Index</h2>
+    <table>
+      <thead><tr><th>CONTROL ID</th><th>TITLE</th><th>VERDICT</th><th>SEVERITY</th></tr></thead>
+      <tbody>{% for result in results %}<tr><td class="mono">{{ result.control_id }}</td><td>{{ result.title }}</td><td><span class="badge {{ result.verdict }}">{{ "N/A" if result.verdict == "NOT_APPLICABLE" else result.verdict }}</span></td><td class="sev-{{ result.severity }}">{{ result.severity }}</td></tr>{% endfor %}</tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Detailed Control Results</h2>
+    {% for result in results %}
+    <article class="control">
+      <div class="control-head"><div class="control-title"><b>{{ result.control_id }}</b>{{ result.title }}</div><div class="control-tags"><span class="badge {{ result.verdict }}">{{ "N/A" if result.verdict == "NOT_APPLICABLE" else result.verdict }}</span> <span class="badge sev-{{ result.severity }}">{{ result.severity }}</span></div></div>
+      <div class="control-body">
+        <div class="label">Requirement</div><div>{{ result.requirement }}</div>
+        <div class="label">Observed value</div><div class="observed mono">{{ result.observed_value }}</div>
+        <div class="label">{{ vendor }} {{ os_type }} remediation</div>
+        {% if result.is_remediation_fallback %}<div class="fallback">AI-generated fallback remediation — operator review required</div>{% endif %}
+        {% if result.remediation_cli %}<div class="remediation mono">{{ result.remediation_cli }}</div>{% else %}<div class="no-remediation">No remediation command is required for this verdict.</div>{% endif %}
+      </div>
+    </article>
+    {% endfor %}
+  </section>
+</body>
+</html>

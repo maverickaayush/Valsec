@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from compliance.cis_cisco_ios import CIS_CISCO_IOS_CONTROLS, FRAMEWORK
 from compliance.engine import ComplianceVerdict, calculate_compliance_score, evaluate_cis_cisco_ios
+from normalizer.cisco_ios import CiscoIOSNormalizer
 from normalizer.schema import InterfaceSettings, VendorNeutralConfig
 
 
@@ -138,6 +139,27 @@ class TestEvaluations:
         values = results_by_id(config)
         assert values["1.2.3"].verdict == ComplianceVerdict.PASS
         assert values["1.10.1"].verdict == ComplianceVerdict.PASS
+
+    def test_console_and_vty_timeout_rules_use_normalized_minutes(self):
+        passing = CiscoIOSNormalizer().parse("""line console 0
+ exec-timeout 10 0
+!
+line vty 0 15
+ exec-timeout 5 30
+""").config
+        passing_results = results_by_id(passing)
+        assert passing_results["1.5.1"].verdict == ComplianceVerdict.PASS
+        assert passing_results["1.5.2"].verdict == ComplianceVerdict.PASS
+
+        failing = CiscoIOSNormalizer().parse("""line console 0
+ exec-timeout 11 0
+!
+line vty 0 15
+ exec-timeout 10 30
+""").config
+        failing_results = results_by_id(failing)
+        assert failing_results["1.5.1"].verdict == ComplianceVerdict.FAIL
+        assert failing_results["1.5.2"].verdict == ComplianceVerdict.FAIL
 
 
 class TestScoring:

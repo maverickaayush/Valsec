@@ -1,323 +1,267 @@
-# ONUS - Automated Vulnerability Assessment & Penetration Testing
+# Valsec
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![CI](https://github.com/maverickaayush/ONUS/actions/workflows/ci.yml/badge.svg)](https://github.com/maverickaayush/ONUS/actions/workflows/ci.yml)
+Valsec is an air-gapped network-device configuration compliance auditor for
+Smart India Hackathon 2026 problem SIH26155. It normalizes Cisco IOS/IOS-XE and
+Juniper JunOS configurations into a shared schema, evaluates compliance with a
+deterministic rule engine, produces vendor CLI remediation, and generates a
+downloadable Valsec compliance PDF.
 
-<p align="center">
-  <a href="https://tryonus.tech"><img src="docs/screenshots/hero-landing.png" alt="ONUS - Find security risks before attackers do." width="820"></a>
-</p>
+Unknown syntax is never discarded. Valsec first checks operator-approved learned
+mappings, then asks a local Ollama model for a reviewable proposal, and pauses the
+audit until an operator approves the mapping. AI cannot set or change a verdict,
+severity, or compliance score.
 
-Built by [maverickaayush](https://github.com/maverickaayush).
+## Implemented scope
 
-A locally-hosted, air-gapped VAPT tool: point it at an authorized target
-domain and it runs 8 scanning modules in parallel, deterministically scores
-every finding (CVSS v3.1), optionally adds AI-generated plain-English
-descriptions via a local LLM, and produces a PDF report plus a live web
-dashboard. No external API calls - everything runs on your own network.
+- Cisco IOS/IOS-XE and Juniper JunOS adapters with source-line provenance.
+- Single configuration, multiple multipart files, and ZIP fleet ingestion. Each
+  configuration gets an independent database lifecycle and Celery task.
+- Deterministic catalogues for:
+  - CIS Cisco IOS Benchmark: 23 controls.
+  - CIS Juniper JunOS Benchmark: 11 representative controls.
+  - NIST SP 800-53 Rev. 5: 8 representative controls.
+  - DISA Network Device STIG V1R1: 6 representative controls.
+  - ISO/IEC 27001:2022 Annex A: 6 representative controls.
+- `queued → normalising → awaiting_training → compliance_check → complete`
+  asynchronous audit lifecycle.
+- Local Ollama mapping proposals, explicit operator approval, persistent learned
+  mappings, and later reuse isolated by user and vendor.
+- Deterministic Cisco and Juniper remediation templates. A missing template may
+  use a validated local Ollama configuration block marked as AI generated and
+  requiring operator review.
+- Nimbus-based Valsec dashboard, upload, fleet list, training queue, results,
+  remediation, and PDF download backed by real APIs.
+- Optional account/session ownership enforcement when `REQUIRE_AUTH=true`.
 
-> **Two ways to run ONUS:**
-> - **Self-hosted (this repo):** `docker compose up` → enter a domain → tick the
->   authorization box → scan. No account, no sign-in, no email verification -
->   it's single-operator by design, and everything below covers this path.
-> - **Hosted:** a managed instance is live at **[tryonus.tech](https://tryonus.tech)**.
->   It layers on production-only features (accounts / OAuth sign-in, a scan
->   queue, per-user history) that default **off** in this repo, so self-hosting
->   stays simple. See [Self-hosted vs hosted](#self-hosted-vs-hosted).
-
-## Features
-
-- **8 parallel scanning modules** (Celery) - network recon
-  (ports/services/subdomains/DNS/WHOIS), web app scanning (ZAP + Nikto +
-  Katana), SSL/TLS config, HTTP security headers, OWASP Top 10 checks, tech
-  fingerprinting/WAF detection, CVE scanning (Nuclei), directory enumeration
-  (FFUF).
-- **Deterministic CVSS v3.1 scoring** - severity, CVSS score/vector,
-  priority, and OWASP category are computed from a rule catalogue, never
-  guessed by an LLM. Two runs of the same scan produce byte-identical
-  numeric fields.
-- **Confidence verification** - findings are passively re-checked
-  (non-destructive re-observation only) and tagged confirmed / probable /
-  unverified rather than silently dropped.
-- **Optional local AI analysis** - Ollama + Qwen 2.5 7B turns scored
-  findings into plain-English descriptions and remediation steps. Fully
-  air-gapped; the tool works without it (see Quick start below).
-- **Context-aware, actionable remediation** - every finding ends with a
-  concrete next step. Stable issues use deterministic templates; genuinely
-  context-dependent ones use the AI; and managed-platform detection
-  (Vercel / Cloudflare / Netlify / GitHub Pages / …) means a platform-owned
-  TLS finding says who controls that layer and what to do next, instead of
-  impossible "edit your server config" advice.
-- **PDF report + web dashboard** - WeasyPrint-rendered report and a Next.js
-  dashboard, both driven by the same scored/described findings.
-
-## Technical write-up
-
-[**Where the LLM Stops: Deterministic Scoring in an AI-Assisted VAPT Pipeline**](https://aayushyadav.hashnode.dev/where-the-llm-stops-deterministic-scoring-in-an-ai-assisted-vapt-pipeline)
-
-A technical deep dive into ONUS's architecture, passive confidence verification, deterministic CVSS scoring, and the boundary between security-critical logic and LLM-assisted explanations and remediation.
-
-## Self-hosted vs hosted
-
-|  | Self-hosted (this repo) | Hosted ([tryonus.tech](https://tryonus.tech)) |
-|---|---|---|
-| Setup | `docker compose up` | none - just open the site |
-| Sign-in | **none** - single operator | account / Google / GitHub OAuth |
-| Scan flow | domain → authorization box → scan | same, after signing in |
-| Extras | - | scan queue, per-user history, hosted email |
-| Runs on | your own network, air-gapped | managed cloud |
-
-The self-hosted default path is intentionally the simple one: **no sign-up, no
-email verification, no OAuth**. The hosted-only features (authentication, scan
-queue) live behind config flags that default **off** (`REQUIRE_AUTH=false`,
-`HOSTED_QUEUE_ENABLED=false`; see [Configuration](#configuration)) and are not
-set in `docker-compose.yml` - so running ONUS locally never puts you behind a
-login. Prefer zero setup? Use the hosted site at
-**[tryonus.tech](https://tryonus.tech)**.
-
-## Screenshots
-
-| New Scan | Live Scan Status |
-|---|---|
-| ![New Scan form](docs/screenshots/new-scan.png) | ![Scan Status page](docs/screenshots/scan-status.png) |
-
-| Report Dashboard | Scans Discovery |
-|---|---|
-| ![Report dashboard](docs/screenshots/report-dashboard.png) | ![Scans discovery dashboard](docs/screenshots/scans-dashboard.png) |
+The NIST, DISA, ISO, and Juniper CIS catalogues are working representative
+catalogues for the SIH demonstration. They are not full certification packs.
 
 ## Architecture
 
-```
-domain → [recon | webscan | ssl_tls | headers | owasp | tech_fingerprint | nuclei | enumeration] (parallel, Celery)
-       → any module failed/timed out? → pause for operator retry/continue/cancel
-       → aggregator (dedup + OWASP-map + sort)
-       → confidence verification (passive re-observation)
-       → deterministic CVSS scoring
-       → Ollama (Qwen 2.5 7B) AI analysis
-       → WeasyPrint PDF + PostgreSQL
-       → dashboard / PDF download
+```mermaid
+flowchart LR
+    UI[Next.js Valsec UI] --> API[FastAPI config APIs]
+    API --> PG[(PostgreSQL)]
+    API --> Q[Redis / Celery]
+    Q --> V{Vendor adapter}
+    V --> C[Cisco IOS]
+    V --> J[Juniper JunOS]
+    C --> S[Vendor-neutral schema]
+    J --> S
+    S -->|unknown syntax| L[User/vendor mapping lookup]
+    L --> O[Local Ollama proposal]
+    O --> T[Operator approval]
+    T --> PG
+    S --> D[Deterministic framework engine]
+    D --> R[Vendor remediation]
+    R --> P[Valsec PDF]
+    P --> PG
 ```
 
-<img src="docs/screenshots/architecture.png" alt="Six-layer architecture diagram" width="420">
-
-Six layers: Next.js frontend → FastAPI → Celery/Redis → 8 parallel scanning
-modules → Ollama (Qwen 2.5 7B) → WeasyPrint PDF + dashboard. Full details in
-[`ARCHITECTURE.md`](ARCHITECTURE.md) (schemas, contracts, guardrails) and
-[`docs/QUICK_REF.md`](docs/QUICK_REF.md) (quick lookup for common changes).
+Compliance catalogues consume only the typed neutral schema. AI and training
+live outside the verdict path. Adding another vendor requires an isolated parser
+and remediation adapter; adding another framework requires a rule catalogue.
 
 ## Prerequisites
 
-- Docker + Docker Compose v2
-- **~8GB free disk.** The built images total ~6.8GB (backend and worker are
-  ~3.25GB each - they bundle Nuclei templates and a headless Chromium via
-  Playwright - plus a ~270MB frontend), and the build itself needs headroom
-  on top.
-- **~6GB free RAM.** The ZAP sidecar alone is capped at 4GB (`mem_limit: 4g`),
-  and Postgres, Redis, the API, the worker and the frontend run alongside it.
-- First build takes roughly 10-15 minutes on a decent connection.
+- Docker with Docker Compose v2
+- Ollama with `qwen2.5:7b` for AI proposals and fallback remediation
+- Python 3.11+ and Node.js 20+ when running services outside Docker
+- WeasyPrint system libraries when running the backend directly
 
-## Quick start
-
-> See Prerequisites above: ~8GB disk and ~6GB RAM, and expect a 10-15 minute
-> first build.
+Prepare local Ollama:
 
 ```bash
-cp .env.example .env
-cp backend/subfinder-config/provider-config.yaml.example backend/subfinder-config/provider-config.yaml
-docker compose up -d
-docker compose ps        # wait for zap to report healthy (~2 min)
+ollama pull qwen2.5:7b
+ollama serve
 ```
 
-Open **http://localhost:3000**, enter a domain, tick the authorization box, and
-start the scan.
+Ollama is optional for deterministic audits. When it is unavailable, unknown
+syntax still enters manual training and missing remediation remains explicitly
+unavailable.
 
-**No sign-in, sign-up, or email verification.** Self-hosted ONUS is
-single-operator by default - there's no account step between opening the
-dashboard and scanning.
+## Docker setup
 
-**This works with no Ollama install.** CVSS/severity/priority scoring is
-always deterministic (`analysis/cvss_scorer.py`) - without Ollama running,
-findings just get a rule-based description template instead of AI-generated
-prose. See "Optional: enable AI-generated descriptions" below to turn that on.
-
-**Zero API keys are required to run this tool.** Every scanning tool it
-wraps (nmap, ZAP, Nikto, testssl.sh, Nuclei, Amass, Naabu, httpx, WhatWeb,
-WAFW00F, FFUF) and Ollama itself work with no key at all. The subfinder
-config copy step above is the one optional exception - leaving it as the
-empty template is fine, subfinder just runs with free/public sources only.
-To deepen subdomain enumeration, you can add up to two free-tier keys to
-that file before starting: a GitHub personal access token and a
-[ProjectDiscovery Chaos](https://chaos.projectdiscovery.io) API key - see
-the comments inside `provider-config.yaml.example`.
-
-## Optional: enable AI-generated descriptions
-
-Ollama runs **natively on the host** (not in Docker) so it can use the
-host's GPU directly; containers reach it via `host.docker.internal`.
-
-1. Install Ollama on the host: https://ollama.com/install.sh
-2. Pull the model: `ollama pull qwen2.5:7b`
-3. **Make Ollama reachable from Docker containers** (Ollama defaults to
-   `127.0.0.1`-only, which Docker's bridge network cannot reach):
-   ```bash
-   sudo systemctl edit ollama
-   ```
-   Add under `[Service]`:
-   ```ini
-   [Service]
-   Environment="OLLAMA_HOST=0.0.0.0:11434"
-   ```
-   Save, then:
-   ```bash
-   sudo systemctl daemon-reload && sudo systemctl restart ollama
-   ```
-   Note: this makes Ollama reachable from your local network, not just
-   Docker - fine on a personal machine, worth a firewall rule on a shared one.
-4. Verify: `curl http://localhost:11434/api/tags`
-5. Restart the backend/worker so they pick it up: `docker compose restart backend worker`
-
-## Optional: practice targets
-
-The compose file also defines 12 intentionally-vulnerable practice apps
-(Juice Shop, DVWA, bWAPP, Mutillidae, NodeGoat, DVWP/WordPress behind a
-ModSecurity WAF, Metasploitable2, WebGoat) for trying the scanner against
-something without needing your own authorized target. They're gated behind
-a Compose profile so they never build/start by default:
+Set deployment secrets, build the stack, and run migrations through the backend
+startup command:
 
 ```bash
-docker compose --profile targets up -d
+export POSTGRES_PASSWORD='replace-with-a-strong-password'
+export SECRET_KEY='replace-with-a-long-random-secret'
+docker compose up -d --build postgres redis zap backend worker frontend
+docker compose ps
 ```
 
-**Warning: these are intentionally-vulnerable, some genuinely backdoored,
-services** (Metasploitable2 ships a live vsftpd backdoor). Only run the
-`targets` profile on a machine that isn't reachable from the internet or a
-shared network - never on a public cloud instance or an exposed host.
+Open <http://localhost:3000>. FastAPI is available at
+<http://127.0.0.1:8000>; development API documentation is at
+<http://127.0.0.1:8000/docs>.
 
-Most of these run from prebuilt images and need nothing extra. Two -
-`nodegoat` and `dvwp-wordpress` - build from source that isn't vendored into
-this repo and must be cloned first:
+The full Compose graph retains the earlier web-scanner services and therefore
+builds a larger backend image and starts ZAP. For a focused native Valsec setup,
+start only PostgreSQL and Redis, then run the API, worker, and frontend from the
+checkout:
 
 ```bash
-git clone https://github.com/OWASP/NodeGoat nodegoat-src
-git clone https://github.com/vavkamil/dvwp dvwp-src
+docker compose up -d postgres redis
+export DATABASE_URL=postgresql://vapt:${POSTGRES_PASSWORD}@127.0.0.1:5432/vapt
+export REDIS_URL=redis://127.0.0.1:6380/0
+export OLLAMA_URL=http://127.0.0.1:11434
+alembic upgrade head
+
+# terminal 1
+cd backend
+uvicorn main:app --host 127.0.0.1 --port 8000
+
+# terminal 2, from backend/
+celery -A tasks.celery_app worker --loglevel=info -c 1
+
+# terminal 3, from frontend/
+npm ci
+npm run build
+npm run start
 ```
 
-Published ports once running: Juice Shop `:3001`, DVWA `:8081`, bWAPP
-`:8083`, Mutillidae `:8084`, NodeGoat `:8085`, DVWP (via WAF, TLS) `:8444`,
-WebGoat `:8082`. Metasploitable2 publishes no host port (reachable only from
-`backend`/`worker` over Docker's internal network) since it exposes real
-backdoored/unauthenticated network services.
+The native frontend listens on <http://localhost:3002> and rewrites `/api/*` to
+the backend at port 8000.
 
-## Configuration
+## Demo configurations
 
-Env vars, set via `.env` (copied from `.env.example`):
+Curated fixtures are in [`backend/tests/sample_configs`](backend/tests/sample_configs):
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `POSTGRES_PASSWORD` | `vapt_secure_2025` | Database password |
-| `SECRET_KEY` | `change_me_to_a_long_random_string` | Backend secret key |
-| `ALLOWED_HOSTS` | `localhost,127.0.0.1` | FastAPI allowed hosts |
-| `OLLAMA_URL` | `http://host.docker.internal:11434` | Where the backend/worker reach Ollama |
-| `SCAN_TIMEOUT_MULTIPLIER` | `1.5` | Scales every module's tool/Celery timeout - real-world targets are slower than lab targets; drop to `1.0` for lab-tuned timings |
-| `MAX_CONCURRENT_SCANS` | `3` | Concurrent-scan cap (resource-exhaustion / target-politeness guard, also sizes the DB connection pool) |
-| `ONUS_ENV` | `development` | `development` (self-hosted localhost — weak secrets only warn) or `production` (weak `SECRET_KEY`/Postgres password become a hard boot failure) |
+| File | Expected behavior |
+|---|---|
+| `cisco_hardened.cfg` | Cisco CIS completes at 100%: 21 PASS, 0 FAIL, 2 N/A |
+| `cisco_vulnerable.cfg` | Completes with deterministic failures and Cisco CLI remediation |
+| `cisco_unseen_syntax.cfg` | Pauses for mapping approval, resumes, and reuses the learned mapping later |
+| `juniper_hardened.conf` | Juniper CIS completes at 100%: 11 PASS, 0 FAIL, 0 N/A |
 
-**The `POSTGRES_PASSWORD`/`SECRET_KEY` defaults above are demo-only** -
-they're fine for a local/personal instance but change both before deploying
-anywhere reachable by anyone else. This is now *enforced*, not just advised:
-set `ONUS_ENV=production` (or turn on hosted auth) and the backend **refuses to
-start** while either is still a default/placeholder. Generate a strong key with
-`python -c "import secrets; print(secrets.token_urlsafe(48))"`.
-
-**Hosted-only features are off by default.** `REQUIRE_AUTH` (accounts / OAuth
-sign-in) and `HOSTED_QUEUE_ENABLED` (scan queue) both default to `false` and
-aren't set in `docker-compose.yml`, so self-hosted ONUS never gates you behind
-a login or a queue. Leave them off unless you're intentionally building a
-multi-user hosted deployment - the managed [tryonus.tech](https://tryonus.tech)
-instance is the one that turns them on.
-
-## Analytics (optional)
-
-ONUS has **no analytics by default** - nothing loads and no data leaves the
-browser. To collect anonymous product-usage metrics on your own deployment,
-set a single Google Analytics 4 Measurement ID:
+Upload one configuration:
 
 ```bash
-NEXT_PUBLIC_GA_ID=G-XXXXXXXXXX
+curl -F file=@backend/tests/sample_configs/cisco_hardened.cfg \
+  -F vendor=cisco \
+  -F framework=cis_cisco_ios_v1 \
+  -F device_name=valsec-hardened \
+  http://127.0.0.1:8000/api/configs/upload
 ```
 
-It's a frontend build-time variable, so set it in the frontend build
-environment (a Vercel/host env var, or `frontend/.env.local` for a local
-`npm run build`). When set, GA loads **only in production builds** and tracks
-page views plus a few product events (e.g. `scan_started`, `scan_completed`,
-`report_downloaded`). Custom events go through the typed helper in
-[`frontend/lib/analytics.ts`](frontend/lib/analytics.ts) -
-`trackEvent('scan_started')`.
+For Juniper, set `vendor=juniper`. Supported framework keys are
+`cis_cisco_ios_v1`, `nist_sp_800_53_rev5`, `disa_stig_network_v1`, and
+`iso_iec_27001_2022`.
 
-**Privacy:** only anonymous, low-cardinality usage events are sent - never
-scanned domains, scan results, findings, report contents, the authorization
-state, or any personal data. Leave `NEXT_PUBLIC_GA_ID` unset and ONUS behaves
-exactly as before; analytics is entirely opt-in.
+A ZIP may contain up to 50 `.cfg`, `.conf`, or `.txt` members. Its response has a
+`configs` array with one ID per member. Poll every ID independently. The selected
+vendor and framework apply to all members in one upload batch.
 
-## API docs
+For the training demo:
 
-FastAPI generates interactive Swagger docs for free - once the backend is
-running, open **http://localhost:8000/docs**.
+```bash
+curl http://127.0.0.1:8000/api/configs/CONFIG_ID/status
+curl http://127.0.0.1:8000/api/configs/CONFIG_ID/unverified
 
-## Stop
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"finding_id":"FINDING_ID","approved_schema_field":"ssh.version","approved_value":2}' \
+  http://127.0.0.1:8000/api/configs/CONFIG_ID/train
+```
+
+After completion, upload the same unseen syntax again. The later audit should use
+the confirmed mapping without entering `awaiting_training`.
+
+## Config API
+
+- `POST /api/configs/upload`
+- `GET /api/configs`
+- `GET /api/configs/{id}/status`
+- `GET /api/configs/{id}/unverified`
+- `POST /api/configs/{id}/train`
+- `GET /api/configs/{id}/results`
+- `GET /api/configs/{id}/report`
+
+Upload safeguards are 5 MiB per plain configuration/member, 10 MiB compressed
+per ZIP, 25 MiB expanded per request, and 50 configurations per request. ZIP
+members are decoded in memory and never extracted to the filesystem.
+
+## Focused validation
+
+Install development dependencies, then run only the Valsec suites:
+
+```bash
+python3 -m pip install -r backend/requirements-dev.txt
+python3 -m pytest \
+  backend/tests/test_demo_configs.py \
+  backend/tests/test_config_router.py \
+  backend/tests/test_audit_orchestrator.py \
+  backend/tests/test_training.py \
+  backend/tests/test_training_integration.py \
+  backend/tests/test_cisco_ios_normalizer.py \
+  backend/tests/test_juniper_normalizer.py \
+  backend/tests/test_cis_engine.py \
+  backend/tests/test_frameworks.py \
+  backend/tests/test_remediation_generator.py \
+  backend/tests/test_valsec_hardening.py -q
+
+cd frontend
+npm ci
+npm run typecheck
+npm run build
+```
+
+## Security and deployment notes
+
+- Configurations may contain credentials. Valsec stores raw configuration and
+  source-backed findings in PostgreSQL for audit traceability. Protect the
+  database, backups, and logs accordingly.
+- Local mode is intentionally single operator and unauthenticated. Bind it to a
+  trusted interface only. For shared use, set `REQUIRE_AUTH=true`, configure a
+  strong `SECRET_KEY` and database password, use TLS-secure cookies, and set exact
+  CORS origins. Production startup checks reject shipped placeholder secrets.
+- Fleet list, status, training, results, and report access use the same owner
+  boundary. Cross-owner IDs return 404 when authentication is enabled.
+- Learned mappings use separate uniqueness scopes for authenticated users and the
+  local single-operator mode, always including the vendor.
+- ZIP traversal, encrypted archives, invalid extensions/encoding, oversized
+  members, archive expansion, excessive member count, and invalid device names
+  are rejected before audit creation.
+- Ollama endpoints are restricted to loopback or recognized local Docker hosts.
+  Prompt content is treated as untrusted JSON, outputs are schema validated, and
+  generated CLI always carries an operator-review marker.
+- A PostgreSQL advisory lock prevents duplicate tasks for one audit from mutating
+  findings/results concurrently. Training uses row locks and database uniqueness;
+  a broker dispatch failure restores a retryable `awaiting_training` state and
+  returns HTTP 503 instead of claiming success.
+- Compliance PDFs include evidence and remediation, but not the complete raw
+  uploaded configuration.
+
+## Known limitations
+
+- The representative Juniper and NIST/DISA/ISO catalogues are demonstration
+  coverage, not complete benchmark or certification content.
+- A batch has one selected vendor and framework. Mixed-vendor archives require
+  separate uploads.
+- Fortinet, Palo Alto, and Arista have parser/remediation extension points but no
+  implemented adapters.
+- AI remediation is reviewable fallback text and may be incomplete or invalid for
+  a particular firmware release; it is never applied automatically.
+- Training dispatch recovery is request-driven rather than a durable outbox. If
+  the broker fails, retry the same training submission after Redis recovers.
+- The Docker database/user names retain historical `vapt` identifiers for
+  migration compatibility. Change the shipped password before shared deployment.
+- The retained legacy scanner increases the full Docker image size and emits
+  unrelated dependency warnings; it is outside the Valsec demo path.
+
+## Retained legacy scanner
+
+The earlier authorized web-scanner implementation remains under `/scan/*` and
+`/scans`, along with its report/UI components. It is preserved as reusable
+infrastructure and is separate from Valsec config audits. See
+[`ARCHITECTURE.md`](ARCHITECTURE.md) and [`docs/`](docs/) for that subsystem.
+
+## Stop services
 
 ```bash
 docker compose down
 ```
 
-## Logs
-
-```bash
-docker compose logs -f backend worker
-```
-
-## Testing & Validation
-
-```bash
-pip install -r backend/requirements-dev.txt
-pytest backend/tests
-```
-
-655 automated backend tests as of this writing. Beyond the unit/integration
-suite, the tool has been exercised end-to-end during development: 79 real
-scans executed and 124 PDF reports generated against nine deliberately-
-vulnerable practice applications (DVWA, Juice Shop, Mutillidae, NodeGoat,
-bWAPP, WebGoat, Metasploitable2, DVWP/WordPress behind a WAF) plus one
-authorized public target (`testphp.vulnweb.com`) - not hypothetical numbers.
-Only ever scan targets you are explicitly authorized to test - see
-[`docs/test_findings.md`](docs/test_findings.md) for the practice targets
-used during development.
-
-## Documentation
-
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) - full architecture, schemas, and
-  the contracts a change should never break. Read this before making a
-  non-trivial change.
-- [`docs/QUICK_REF.md`](docs/QUICK_REF.md) - run commands, folder
-  responsibilities, "where do I make this change."
-- [`docs/scanners.md`](docs/scanners.md) - reasoning behind each scanning
-  module's timing/flag design.
-- [`docs/ai.md`](docs/ai.md) - Ollama timeout/context tuning, why scoring
-  moved off the LLM entirely.
-- [`docs/docker.md`](docs/docker.md) - Docker deviation notes and build
-  gotchas.
-- [`docs/troubleshooting.md`](docs/troubleshooting.md) - how to manually
-  test any module/stage in isolation.
-- [`docs/roadmap.md`](docs/roadmap.md) - historical build sequence
-  (build is complete).
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) - dev setup, tests, PR expectations.
-
 ## License
 
-MIT - see [LICENSE](LICENSE).
-
-## Authorized use only
-
-Scanning targets without explicit written authorization is illegal under the
-IT Act 2000 (India) and equivalent international statutes. This tool
-requires authorization confirmation on every scan and logs the operator +
-timestamp for accountability.
+MIT — see [`LICENSE`](LICENSE).

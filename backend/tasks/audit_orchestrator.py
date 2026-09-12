@@ -7,32 +7,55 @@ this task again after saving approved mappings.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from compliance.engine import ComplianceVerdict as EngineVerdict, evaluate_cis_cisco_ios
+from sqlalchemy import text
+
+from analysis.ollama_client import propose_config_mappings
+from compliance.engine import ComplianceVerdict as EngineVerdict, evaluate_compliance
 from normalizer.cisco_ios import CiscoIOSNormalizer
-from remediation.cisco_remediation import generate_remediation
+from normalizer.juniper_junos import JuniperJunosNormalizer
+from remediation.service import resolve_remediation
 from tasks.celery_app import app
-from training.matcher import DatabaseLearnedMappingResolver
+from training.matcher import CONFIG_SCHEMA_REFERENCE, DatabaseLearnedMappingResolver
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class _ConfigReportView:
-    """Minimal legacy-report renderer view; avoids changing the scan pipeline."""
+def _acquire_audit_lock(db, config_id: str):
+    """Hold one PostgreSQL advisory lock across the task's intermediate commits."""
+    try:
+        bind = db.get_bind()
+    except AttributeError:
+        return None  # Lightweight unit-test sessions and non-SQLAlchemy adapters.
+    if bind.dialect.name != "postgresql":
+        return None
+    connection = bind.connect()
+    acquired = connection.execute(
+        text("SELECT pg_try_advisory_lock(hashtextextended(:config_id, 0))"),
+        {"config_id": config_id},
+    ).scalar()
+    if not acquired:
+        connection.close()
+        return False
+    return connection
 
-    id: UUID
-    domain: str
-    started_at: datetime | None
-    completed_at: datetime | None
-    scan_type: str = "full"
+
+def _release_audit_lock(connection, config_id: str) -> None:
+    if connection is None or connection is False:
+        return
+    try:
+        connection.execute(
+            text("SELECT pg_advisory_unlock(hashtextextended(:config_id, 0))"),
+            {"config_id": config_id},
+        )
+    finally:
+        connection.close()
 
 
-def _persist_findings(db, config, normalized) -> bool:
+def _persist_findings(db, config, normalized, proposals: dict[int, dict] | None = None) -> bool:
     """Replace findings for this pass and return whether human training is needed."""
     from models import ConfidenceTier, NormalizedFinding
 
@@ -47,25 +70,41 @@ def _persist_findings(db, config, normalized) -> bool:
             confidence=ConfidenceTier(finding.confidence),
             mapping_source=str(finding.mapping_source),
         ))
+    proposals = proposals or {}
     for unknown in normalized.unknown_lines:
+        proposal = proposals.get(unknown.line_number)
+        has_proposal = bool(proposal and proposal.get("schema_field"))
         db.add(NormalizedFinding(
             config_id=config.id,
-            schema_field="unrecognized",
-            field_value={"context": unknown.context, "raw_line": unknown.raw_source_line},
+            schema_field=proposal["schema_field"] if has_proposal else "unrecognized",
+            field_value={
+                "context": unknown.context,
+                "raw_line": unknown.raw_source_line,
+                **({
+                    "field_value": proposal.get("field_value"),
+                    "ai_confidence": proposal["confidence"],
+                } if has_proposal else {}),
+            },
             raw_source_line=unknown.raw_source_line,
             line_number=unknown.line_number,
             confidence=ConfidenceTier.unverified,
-            mapping_source="parser",
+            mapping_source="ai_proposal" if has_proposal else "parser",
         ))
     return bool(normalized.unknown_lines)
 
 
-def _persist_compliance_results(db, config, report) -> None:
+def _persist_compliance_results(db, config, report) -> dict[str, Any]:
     from models import ComplianceResult, ComplianceSeverity, ComplianceVerdict
 
     db.query(ComplianceResult).filter(ComplianceResult.config_id == config.id).delete()
+    remediations: dict[str, Any] = {}
     for result in report.results:
-        remediation = generate_remediation(result.control_id) if result.verdict == EngineVerdict.FAIL else None
+        remediation = (
+            resolve_remediation(config.vendor, config.os_type, result)
+            if result.verdict == EngineVerdict.FAIL else None
+        )
+        if remediation is not None:
+            remediations[result.control_id] = remediation
         db.add(ComplianceResult(
             config_id=config.id,
             framework=result.framework,
@@ -78,32 +117,15 @@ def _persist_compliance_results(db, config, report) -> None:
             remediation_cli=remediation.cli if remediation else None,
             is_remediation_fallback=remediation.is_fallback if remediation else False,
         ))
+    return remediations
 
 
-def _generate_report(db, config, report) -> None:
-    """Use the established WeasyPrint renderer, then persist a Config Report."""
+def _generate_report(db, config, report, remediations: dict[str, Any] | None = None) -> None:
+    """Render and persist the dedicated Valsec compliance report."""
     from models import Report
-    from reports.generator import generate_pdf
+    from reports.compliance_generator import generate_compliance_pdf
 
-    view = _ConfigReportView(config.id, config.device_name, config.uploaded_at, config.completed_at)
-    severity_counts = {severity: 0 for severity in ("Critical", "High", "Medium", "Low", "Informational")}
-    for result in report.results:
-        if result.verdict == EngineVerdict.FAIL:
-            severity_counts[result.severity] += 1
-    analysis = {
-        "risk_score": 0,
-        "findings": [],
-        "executive_summary": (
-            f"CIS Cisco IOS audit completed for {config.device_name}: "
-            f"{report.total_passed} passed, {report.total_failed} failed, {report.total_na} not applicable."
-        ),
-        "total_critical": severity_counts["Critical"],
-        "total_high": severity_counts["High"],
-        "total_medium": severity_counts["Medium"],
-        "total_low": severity_counts["Low"],
-        "total_informational": severity_counts["Informational"],
-    }
-    pdf_data = generate_pdf(view, analysis, store_in_db=False)
+    pdf_data = generate_compliance_pdf(config, report, remediations=remediations)
     existing = db.query(Report).filter(Report.config_id == config.id).first()
     if existing:
         existing.pdf_data = pdf_data
@@ -120,7 +142,12 @@ def run_config_audit(config_id: str) -> dict[str, Any]:
 
     db = SessionLocal()
     config = None
+    lock_connection = None
     try:
+        lock_connection = _acquire_audit_lock(db, str(config_id))
+        if lock_connection is False:
+            logger.info("Audit %s is already running; duplicate task ignored", config_id)
+            return {"status": "already_running", "config_id": str(config_id)}
         config = db.query(Config).filter(Config.id == UUID(str(config_id))).first()
         if config is None:
             return {"status": "missing", "config_id": str(config_id)}
@@ -132,9 +159,33 @@ def run_config_audit(config_id: str) -> dict[str, Any]:
 
         # Use the database-backed learned mapping resolver to check for existing
         # operator-approved mappings before falling back to unknown lines
-        resolver = DatabaseLearnedMappingResolver(db)
-        normalized = CiscoIOSNormalizer(learned_mapping_resolver=resolver).parse(config.raw_config)
-        training_required = _persist_findings(db, config, normalized)
+        resolver = DatabaseLearnedMappingResolver(db, user_id=config.user_id)
+        normalizer_type = {
+            "cisco": CiscoIOSNormalizer,
+            "juniper": JuniperJunosNormalizer,
+        }.get(config.vendor)
+        if normalizer_type is None:
+            raise ValueError(f"Unsupported configuration vendor: {config.vendor}")
+        normalized = normalizer_type(learned_mapping_resolver=resolver).parse(config.raw_config)
+        if normalized.config.device_info.os_version:
+            config.firmware_version = normalized.config.device_info.os_version
+        try:
+            proposals = propose_config_mappings(
+                config.vendor,
+                [
+                    {
+                        "line_number": line.line_number,
+                        "raw_source_line": line.raw_source_line,
+                        "context": line.context,
+                    }
+                    for line in normalized.unknown_lines
+                ],
+                CONFIG_SCHEMA_REFERENCE,
+            )
+        except Exception:
+            logger.exception("Ollama proposal generation failed; manual training remains available")
+            proposals = {}
+        training_required = _persist_findings(db, config, normalized, proposals)
         if config.status == ConfigStatus.cancelled:
             db.commit()
             return {"status": "cancelled", "config_id": str(config.id)}
@@ -145,14 +196,16 @@ def run_config_audit(config_id: str) -> dict[str, Any]:
 
         config.status = ConfigStatus.compliance_check
         db.commit()
-        report = evaluate_cis_cisco_ios(normalized.config)
-        _persist_compliance_results(db, config, report)
+        report = evaluate_compliance(
+            normalized.config, config.selected_framework, config.vendor
+        )
+        remediations = _persist_compliance_results(db, config, report)
         config.compliance_score = report.compliance_score
         config.total_passed = report.total_passed
         config.total_failed = report.total_failed
         config.total_na = report.total_na
         config.completed_at = datetime.utcnow()
-        _generate_report(db, config, report)
+        _generate_report(db, config, report, remediations)
         config.status = ConfigStatus.complete
         db.commit()
         return {"status": "complete", "config_id": str(config.id), "score": report.compliance_score}
@@ -167,6 +220,7 @@ def run_config_audit(config_id: str) -> dict[str, Any]:
                 db.rollback()
         return {"status": "failed", "config_id": str(config_id), "error": f"{type(exc).__name__}: {exc}"}
     finally:
+        _release_audit_lock(lock_connection, str(config_id))
         db.close()
 
 

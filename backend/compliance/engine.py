@@ -1,4 +1,4 @@
-"""Pure deterministic evaluator for the CIS Cisco IOS control catalogue.
+"""Pure deterministic evaluator for modular compliance control catalogues.
 
 This module intentionally imports no AI, network, database, or task component.
 The same normalized schema always produces the same ordered results and score.
@@ -8,7 +8,7 @@ from enum import StrEnum
 
 from normalizer.schema import VendorNeutralConfig
 
-from .cis_cisco_ios import CIS_CISCO_IOS_CONTROLS, NOT_APPLICABLE
+from .catalogues import get_controls
 
 
 class ComplianceVerdict(StrEnum):
@@ -50,8 +50,13 @@ def calculate_compliance_score(results: tuple[ComplianceResult, ...]) -> float:
     return round((passed / len(applicable)) * 100, 2)
 
 
-def evaluate_cis_cisco_ios(config: VendorNeutralConfig) -> ComplianceReport:
-    """Evaluate every CIS IOS control in catalogue order without side effects."""
+def evaluate_compliance(
+    config: VendorNeutralConfig,
+    framework_key: str = "cis_cisco_ios_v1",
+    vendor: str = "cisco",
+) -> ComplianceReport:
+    """Evaluate one registered catalogue without side effects or AI input."""
+    controls = get_controls(framework_key, vendor)
     results = tuple(
         ComplianceResult(
             control_id=control.control_id,
@@ -62,7 +67,7 @@ def evaluate_cis_cisco_ios(config: VendorNeutralConfig) -> ComplianceReport:
             observed_detail=detail,
             remediation_reference=control.remediation_reference,
         )
-        for control in CIS_CISCO_IOS_CONTROLS
+        for control in controls
         for verdict, detail in (control.evaluate(config),)
     )
     return ComplianceReport(
@@ -72,3 +77,8 @@ def evaluate_cis_cisco_ios(config: VendorNeutralConfig) -> ComplianceReport:
         total_failed=sum(result.verdict == ComplianceVerdict.FAIL for result in results),
         total_na=sum(result.verdict == ComplianceVerdict.NOT_APPLICABLE for result in results),
     )
+
+
+def evaluate_cis_cisco_ios(config: VendorNeutralConfig) -> ComplianceReport:
+    """Backward-compatible Cisco CIS evaluator."""
+    return evaluate_compliance(config, "cis_cisco_ios_v1", "cisco")

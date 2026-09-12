@@ -55,14 +55,14 @@ class AccessControl:
 
 @dataclass
 class LineConsole:
-    exec_timeout_minutes: int | None = None
+    exec_timeout_minutes: int | float | None = None
     transport_preferred: str | None = None
 
 
 @dataclass
 class LineVTY:
     transport_input: list[str] = field(default_factory=list)
-    exec_timeout_minutes: int | None = None
+    exec_timeout_minutes: int | float | None = None
     access_class: str | None = None
 
 

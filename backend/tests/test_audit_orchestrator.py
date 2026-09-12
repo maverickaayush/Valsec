@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import database
 from models import Config, ConfigStatus
-from normalizer.schema import NormalizationResult, UnknownLine
+from normalizer.schema import DeviceInfo, NormalizationResult, UnknownLine, VendorNeutralConfig
 from tasks import audit_orchestrator as audit
 
 
@@ -29,7 +29,10 @@ class Db:
 
 
 def _config(status=ConfigStatus.queued):
-    return Config(id=uuid4(), device_name="edge", raw_config="hostname edge", status=status)
+    return Config(
+        id=uuid4(), device_name="edge", vendor="cisco", os_type="ios",
+        selected_framework="cis_cisco_ios_v1", raw_config="hostname edge", status=status,
+    )
 
 
 def _patch_session(monkeypatch, config):
@@ -42,31 +45,117 @@ def test_unverified_normalization_pauses_without_engine(monkeypatch):
     config = _config()
     _patch_session(monkeypatch, config)
     monkeypatch.setattr(audit.CiscoIOSNormalizer, "parse", lambda *_: NormalizationResult(unknown_lines=[UnknownLine("future syntax", 1)]))
-    monkeypatch.setattr(audit, "evaluate_cis_cisco_ios", lambda *_: (_ for _ in ()).throw(AssertionError("engine must not run")))
+    monkeypatch.setattr(audit, "evaluate_compliance", lambda *_: (_ for _ in ()).throw(AssertionError("engine must not run")))
     outcome = audit.run_config_audit.run(str(config.id))
     assert outcome["status"] == "awaiting_training"
     assert config.status == ConfigStatus.awaiting_training
 
 
+def test_ollama_proposal_is_persisted_but_remains_unverified(monkeypatch):
+    config = _config()
+    db = _patch_session(monkeypatch, config)
+    unknown = UnknownLine("vendor ssh generation 2", 7, "line_vty")
+    monkeypatch.setattr(
+        audit.CiscoIOSNormalizer,
+        "parse",
+        lambda *_: NormalizationResult(unknown_lines=[unknown]),
+    )
+    monkeypatch.setattr(
+        audit,
+        "propose_config_mappings",
+        lambda *_: {7: {"schema_field": "ssh.version", "field_value": 2, "confidence": 0.96}},
+    )
+    outcome = audit.run_config_audit.run(str(config.id))
+    persisted = next(item for item in db.added if getattr(item, "raw_source_line", None))
+    assert outcome["status"] == "awaiting_training"
+    assert str(persisted.confidence) == "ConfidenceTier.unverified"
+    assert persisted.mapping_source == "ai_proposal"
+    assert persisted.schema_field == "ssh.version"
+    assert persisted.field_value["ai_confidence"] == 0.96
+
+
+def test_audit_constructs_user_scoped_mapping_resolver(monkeypatch):
+    config = _config()
+    config.user_id = uuid4()
+    _patch_session(monkeypatch, config)
+    captured = {}
+
+    class Resolver:
+        def __init__(self, _db, user_id=None): captured["user_id"] = user_id
+
+    monkeypatch.setattr(audit, "DatabaseLearnedMappingResolver", Resolver)
+    monkeypatch.setattr(audit.CiscoIOSNormalizer, "parse", lambda *_: NormalizationResult())
+    monkeypatch.setattr(audit, "_persist_findings", lambda *_: False)
+    report = SimpleNamespace(compliance_score=100.0, total_passed=1, total_failed=0, total_na=0)
+    monkeypatch.setattr(audit, "evaluate_compliance", lambda *_: report)
+    monkeypatch.setattr(audit, "_persist_compliance_results", lambda *_: None)
+    monkeypatch.setattr(audit, "_generate_report", lambda *_: None)
+    audit.run_config_audit.run(str(config.id))
+    assert captured["user_id"] == config.user_id
+
+
 def test_confirmed_path_runs_compliance_persists_totals_and_completes(monkeypatch):
     config = _config()
     _patch_session(monkeypatch, config)
-    monkeypatch.setattr(audit.CiscoIOSNormalizer, "parse", lambda *_: NormalizationResult())
+    normalized_config = VendorNeutralConfig(device_info=DeviceInfo(os_version="17.9.4"))
+    monkeypatch.setattr(audit.CiscoIOSNormalizer, "parse", lambda *_: NormalizationResult(config=normalized_config))
     monkeypatch.setattr(audit, "_persist_findings", lambda *_: False)
     report = SimpleNamespace(compliance_score=87.5, total_passed=7, total_failed=1, total_na=2)
-    monkeypatch.setattr(audit, "evaluate_cis_cisco_ios", lambda *_: report)
+    monkeypatch.setattr(audit, "evaluate_compliance", lambda *_: report)
     monkeypatch.setattr(audit, "_persist_compliance_results", lambda *_: None)
     monkeypatch.setattr(audit, "_generate_report", lambda *_: None)
     outcome = audit.run_config_audit.run(str(config.id))
     assert outcome["status"] == "complete"
     assert config.status == ConfigStatus.complete
+    assert config.firmware_version == "17.9.4"
     assert (config.compliance_score, config.total_passed, config.total_failed, config.total_na) == (87.5, 7, 1, 2)
+
+
+def test_juniper_and_selected_framework_dispatch_through_existing_pipeline(monkeypatch):
+    config = _config()
+    config.vendor = "juniper"
+    config.os_type = "junos"
+    config.selected_framework = "nist_sp_800_53_rev5"
+    config.raw_config = "set system host-name edge"
+    _patch_session(monkeypatch, config)
+    normalized = NormalizationResult(config=VendorNeutralConfig(device_info=DeviceInfo(os_version="22.4R1")))
+    monkeypatch.setattr(audit.JuniperJunosNormalizer, "parse", lambda *_: normalized)
+    monkeypatch.setattr(audit, "_persist_findings", lambda *_: False)
+    captured = {}
+    report = SimpleNamespace(compliance_score=75.0, total_passed=3, total_failed=1, total_na=4)
+    def evaluate(value, framework, vendor):
+        captured.update(config=value, framework=framework, vendor=vendor)
+        return report
+    monkeypatch.setattr(audit, "evaluate_compliance", evaluate)
+    monkeypatch.setattr(audit, "_persist_compliance_results", lambda *_: {})
+    monkeypatch.setattr(audit, "_generate_report", lambda *_: None)
+
+    outcome = audit.run_config_audit.run(str(config.id))
+    assert outcome["status"] == "complete"
+    assert captured == {
+        "config": normalized.config,
+        "framework": "nist_sp_800_53_rev5",
+        "vendor": "juniper",
+    }
+    assert config.firmware_version == "22.4R1"
 
 
 def test_cancelled_config_is_not_processed(monkeypatch):
     config = _config(ConfigStatus.cancelled)
     _patch_session(monkeypatch, config)
     assert audit.run_config_audit.run(str(config.id))["status"] == "cancelled"
+
+
+def test_duplicate_running_task_is_ignored_before_database_mutation(monkeypatch):
+    config = _config()
+    db = _patch_session(monkeypatch, config)
+    monkeypatch.setattr(audit, "_acquire_audit_lock", lambda *_: False)
+
+    outcome = audit.run_config_audit.run(str(config.id))
+
+    assert outcome["status"] == "already_running"
+    assert db.commits == 0
+    assert config.status == ConfigStatus.queued
 
 
 def test_exception_marks_config_failed(monkeypatch):

@@ -9,18 +9,15 @@ Critical: AI proposes only. Operator approval is required before persistence.
 Compliance verdicts remain 100% deterministic via rule evaluation.
 """
 
-import json
 import logging
 import re
-import time
 from dataclasses import dataclass
 from typing import Any, Optional
 from uuid import UUID
 
-import requests
 from sqlalchemy.orm import Session
 
-from config import settings
+from analysis.ollama_client import propose_config_mappings
 from models import LearnedMapping
 from normalizer.schema import Confidence, MappingSource, NormalizedFinding
 
@@ -33,91 +30,45 @@ class MappingMatch:
 
 logger = logging.getLogger(__name__)
 
-# Ollama configuration following existing patterns from analysis/ollama_client.py
-_OLLAMA_BASE_URL = "http://localhost:11434"
-_OLLAMA_TIMEOUT = round(30 * settings.SCAN_TIMEOUT_MULTIPLIER)  # 30s baseline, scaled
-_MAX_RETRIES = 3
-_RETRY_DELAY = 1  # seconds between retries
-
-
-def _call_ollama(
-    prompt: str,
-    model: str = "qwen2.5:7b",
-    format: str = "json",
-    timeout_ms: int = 30000,
-    max_retries: int = 3,
-) -> Optional[str]:
-    """Call Ollama API following existing retry/timeout patterns.
-
-    This function implements the same integration pattern as analysis/ollama_client.py:
-    - Retry logic (default 3 attempts)
-    - JSON format mode for structured responses
-    - Timeout scaling
-    - No configuration data sent externally (only the specific CLI line)
-
-    Args:
-        prompt: The prompt to send to Ollama
-        model: Model name (default: qwen2.5:7b for local inference)
-        format: Response format (default: "json")
-        timeout_ms: Timeout in milliseconds (default: 30000)
-        max_retries: Maximum retry attempts (default: 3)
-
-    Returns:
-        The model's text response, or None on failure.
-    """
-    url = f"{_OLLAMA_BASE_URL}/api/generate"
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        "format": format,
-    }
-
-    for attempt in range(max_retries):
-        try:
-            start = time.time()
-            response = requests.post(
-                url, json=payload, timeout=timeout_ms / 1000  # Convert to seconds
-            )
-            elapsed = time.time() - start
-
-            if response.status_code == 200:
-                data = response.json()
-                response_text = data.get("response", "")
-                logger.info(
-                    f"Ollama responded in {elapsed:.2f}s (attempt {attempt + 1})"
-                )
-                return response_text
-            else:
-                logger.warning(
-                    f"Ollama returned status {response.status_code} "
-                    f"(attempt {attempt + 1}/{max_retries})"
-                )
-
-        except requests.exceptions.Timeout:
-            logger.warning(
-                f"Ollama timeout after {timeout_ms/1000:.1f}s "
-                f"(attempt {attempt + 1}/{max_retries})"
-            )
-        except requests.exceptions.ConnectionError:
-            logger.warning(
-                f"Ollama connection refused (attempt {attempt + 1}/{max_retries})"
-            )
-            # No point retrying if server is down
-            return None
-        except Exception as exc:
-            logger.error(f"Ollama call failed: {exc} (attempt {attempt + 1}/{max_retries})")
-
-        # Wait before retry (except on last attempt)
-        if attempt < max_retries - 1:
-            time.sleep(_retry_delay)
-
-    logger.error(f"Ollama failed after {max_retries} attempts")
-    return None
+CONFIG_SCHEMA_REFERENCE = {
+    "device_info.hostname": "Device hostname string",
+    "device_info.domain_name": "Device domain name string",
+    "device_info.model": "Device model string",
+    "device_info.os_version": "Operating-system version string",
+    "device_info.enable_secret_type": "Enable-secret hash type integer",
+    "service_hardening.password_encryption": "Whether password encryption is enabled",
+    "service_hardening.finger_disabled": "Whether the finger service is disabled",
+    "service_hardening.tcp_small_servers_disabled": "Whether TCP small servers are disabled",
+    "service_hardening.udp_small_servers_disabled": "Whether UDP small servers are disabled",
+    "service_hardening.bootp_server_disabled": "Whether the BOOTP server is disabled",
+    "service_hardening.http_server_disabled": "Whether the HTTP server is disabled",
+    "service_hardening.http_secure_server_enabled": "Whether the HTTPS server is enabled",
+    "access_control.banner_motd": "Message-of-the-day warning banner text",
+    "access_control.banner_login": "Login warning banner text",
+    "access_control.source_route_disabled": "Whether IP source routing is disabled",
+    "line_console.exec_timeout_minutes": "Console idle timeout in minutes",
+    "line_console.transport_preferred": "Preferred console transport string",
+    "line_vty.transport_input": "Allowed VTY transports as a list",
+    "line_vty.exec_timeout_minutes": "VTY idle timeout in minutes",
+    "line_vty.access_class": "VTY access-class name",
+    "ssh.version": "SSH protocol version integer",
+    "ssh.timeout_seconds": "SSH authentication timeout in seconds",
+    "ssh.auth_retries": "SSH authentication retry count",
+    "aaa.new_model": "Whether AAA new-model is enabled",
+    "aaa.authentication_login": "AAA login authentication method string",
+    "logging.buffered_size": "Logging buffer size in bytes",
+    "logging.trap_severity": "Remote logging trap severity",
+    "logging.timestamps_enabled": "Whether millisecond log timestamps are enabled",
+    "snmp.v3_only": "Whether only SNMPv3 is configured",
+    "snmp.default_communities_removed": "Whether default SNMP communities are absent",
+    "ntp.servers": "NTP server addresses as a list",
+    "ntp.authenticate": "Whether NTP authentication is enabled",
+    "cdp.global_disabled": "Whether CDP is globally disabled",
+}
 
 
 def resolve_line(
-    vendor: str, raw_line: str, db: Session
+    vendor: str, raw_line: str, db: Session, user_id: UUID | None = None
 ) -> Optional[NormalizedFinding]:
     """Check learned_mappings for an existing mapping.
 
@@ -146,17 +97,20 @@ def resolve_line(
             .filter(
                 LearnedMapping.vendor == vendor,
                 LearnedMapping.pattern_signature == pattern,
+                LearnedMapping.user_id == user_id,
             )
             .first()
         )
 
         if mapping:
             logger.info(
-                f"Resolved learned mapping for {vendor}: {raw_line[:50]}... -> {mapping.schema_field}"
+                "Resolved learned mapping for %s -> %s", vendor, mapping.schema_field
             )
+            example = _mapping_example(mapping.examples, raw_line)
+            field_value = example.get("field_value") if isinstance(example, dict) else example
             return NormalizedFinding(
                 schema_field=mapping.schema_field,
-                field_value=mapping.examples[0] if mapping.examples else None,
+                field_value=field_value,
                 raw_source_line=raw_line,
                 line_number=None,  # Will be set by caller
                 confidence=Confidence.CONFIRMED,
@@ -193,71 +147,21 @@ def classify_with_ollama(
     if not raw_line or not raw_line.strip():
         return None
 
-    # Build schema reference for the prompt (field names + descriptions)
-    schema_desc = "\n".join(
-        f"- {field}: {desc}" for field, desc in schema_reference.items()
+    proposals = propose_config_mappings(
+        vendor,
+        [{"line_number": 1, "raw_source_line": raw_line, "context": None}],
+        schema_reference,
     )
+    return proposals.get(1)
 
-    prompt = f"""Given a {vendor.upper()} CLI configuration line, propose which schema field it maps to.
 
-Configuration line: {raw_line}
-
-Available schema fields:
-{schema_desc}
-
-Return a JSON object with:
-- "schema_field": the field name (or null if no match)
-- "field_value": the parsed value for that field
-- "confidence": your confidence (0.0-1.0)
-
-Example:
-{{"schema_field": "ssh_version", "field_value": 2, "confidence": 0.95}}
-
-Response (JSON only):"""
-
-    try:
-        response = _call_ollama(
-            prompt,
-            model="qwen2.5:7b",
-            format="json",
-            timeout_ms=30000,
-            max_retries=3,
-        )
-
-        if response is None:
-            logger.warning("Ollama unreachable; skipping classification")
-            return None
-
-        # Parse the JSON response
-        try:
-            result = json.loads(response)
-            schema_field = result.get("schema_field")
-            field_value = result.get("field_value")
-            confidence = float(result.get("confidence", 0.5))
-
-            # Validate schema_field is in the reference
-            if schema_field and schema_field not in schema_reference:
-                logger.warning(
-                    f"Ollama proposed unknown schema field: {schema_field}"
-                )
-                schema_field = None
-
-            logger.info(
-                f"Ollama classified {vendor} line: {raw_line[:50]}... -> {schema_field} (confidence={confidence})"
-            )
-
-            return {
-                "schema_field": schema_field,
-                "field_value": field_value,
-                "confidence": confidence,
-            }
-        except json.JSONDecodeError as e:
-            logger.error(f"Ollama returned invalid JSON: {response[:100]}... ({e})")
-            return None
-
-    except Exception as exc:
-        logger.error(f"Error calling Ollama classifier: {exc}")
-        return None
+def _mapping_example(examples: list | None, raw_line: str) -> Any:
+    """Prefer the approved value for this exact line within a broad pattern."""
+    values = examples or []
+    for example in values:
+        if isinstance(example, dict) and example.get("raw_line") == raw_line:
+            return example
+    return values[0] if values else None
 
 
 def _generate_pattern_signature(raw_line: str) -> str:
@@ -304,8 +208,9 @@ class DatabaseLearnedMappingResolver:
     parsing. No AI involved — pure database lookup of operator-approved mappings.
     """
 
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, user_id: UUID | None = None):
         self._db = db
+        self._user_id = user_id
 
     def resolve(self, *, vendor: str, raw_line: str, line_number: int,
                 context: str | None) -> MappingMatch | None:
@@ -321,17 +226,20 @@ class DatabaseLearnedMappingResolver:
                 .filter(
                     LearnedMapping.vendor == vendor,
                     LearnedMapping.pattern_signature == pattern,
+                    LearnedMapping.user_id == self._user_id,
                 )
                 .first()
             )
 
             if mapping:
                 logger.info(
-                    f"Resolved learned mapping for {vendor}: {raw_line[:50]}... -> {mapping.schema_field}"
+                    "Resolved learned mapping for %s -> %s", vendor, mapping.schema_field
                 )
+                example = _mapping_example(mapping.examples, raw_line)
+                field_value = example.get("field_value") if isinstance(example, dict) else example
                 return MappingMatch(
                     schema_field=mapping.schema_field,
-                    field_value=mapping.examples[0] if mapping.examples else None,
+                    field_value=field_value,
                 )
         except Exception as exc:
             logger.error(f"Error resolving learned mapping: {exc}")

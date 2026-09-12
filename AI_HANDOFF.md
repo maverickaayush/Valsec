@@ -1157,3 +1157,709 @@ When entering Phase 2, the **very first coding task** should be:
 > 4. Run `alembic upgrade head` to establish the database contract.
 >
 > Once the database schema is verified, build `backend/normalizer/schema.py` and `backend/normalizer/cisco_ios.py` against this contract.
+
+---
+
+## Implementation Update: Nimbus Frontend / Backend Integration (2026-09-12)
+
+### Integration Completed
+
+The approved `nimbus-2` prototype is now the visual and interaction foundation
+for the live Valsec frontend. Its Valsec branding, black/green cyber aesthetic,
+editorial sidebar dashboard, upload drop zone, fleet table, split training view,
+compliance scorecard, expandable control findings, remediation CLI panel, and
+PDF action are retained. All audit values shown in the operational views now
+come from the Valsec config APIs; the prototype's sample devices, scores,
+findings, and training lines are no longer used.
+
+The working frontend routes are:
+
+- `/` — real fleet overview and compliance aggregates.
+- `/configs/upload` — single or multi-file Cisco upload queue. Multi-file UI
+  uploads each file as a separate request because the backend accepts one
+  configuration per request.
+- `/configs` — real fleet/audit listing with search, status filters, refresh,
+  and background polling.
+- `/configs/{id}/status` — lifecycle polling and progress through upload,
+  normalisation, training gate, deterministic evaluation, and report creation.
+- `/training` and `/configs/{id}/training` — real awaiting-training queue,
+  unverified source-line retrieval, canonical field/value selection, and
+  per-finding `Teach & Resume` submission.
+- `/configs/{id}/report` — real compliance summary, verdict filtering,
+  severity counts, expandable evidence, CLI remediation copy action, and PDF
+  download.
+- `/frameworks` — an honest capability view showing CIS Cisco IOS as the only
+  implemented framework; planned frameworks remain informational.
+
+### API Contracts Used
+
+- `POST /api/configs/upload`
+- `GET /api/configs`
+- `GET /api/configs/{id}/status`
+- `GET /api/configs/{id}/results`
+- `GET /api/configs/{id}/report`
+- `GET /api/configs/{id}/unverified`
+- `POST /api/configs/{id}/train`
+
+The frontend handles the implemented training wire format
+(`finding_id`, `approved_schema_field`, `approved_value`) one finding at a time;
+it does not use the older proposal example's batch `mappings` payload. The
+implemented unverified response does not expose an AI suggestion or confidence,
+so the training UI clearly requests an explicit operator mapping instead of
+fabricating either value.
+
+### Files Changed
+
+- `frontend/app/globals.css` — replaced the legacy ONUS field-manual theme with
+  the approved Nimbus Valsec styling and added loading, error, empty, lifecycle,
+  and real training states.
+- `frontend/app/layout.tsx` — Valsec metadata, dark viewport, and air-gap-safe
+  system font stack (no build-time Google Fonts request).
+- `frontend/app/page.tsx` — Valsec fleet command center entry point.
+- `frontend/app/icon.svg` — Valsec dark/green application mark matching the
+  Nimbus sidebar identity.
+- `frontend/app/robots.ts` — Valsec operator-route exclusions.
+- `frontend/app/configs/page.tsx`
+- `frontend/app/configs/upload/page.tsx`
+- `frontend/app/configs/[id]/status/page.tsx`
+- `frontend/app/configs/[id]/training/page.tsx`
+- `frontend/app/configs/[id]/report/page.tsx`
+- `frontend/app/training/page.tsx`
+- `frontend/app/frameworks/page.tsx`
+- `frontend/components/valsec-console.tsx` — integrated Nimbus application shell
+  and all real dashboard/upload/status/training/results/report views.
+- `frontend/lib/valsec-api.ts` — typed API types, response/error handling,
+  upload/list/status/results/unverified/training calls, and report URL.
+- `frontend/package.json`, `frontend/package-lock.json` — frontend package name
+  updated to Valsec.
+- `backend/routers/training.py`, `backend/training/matcher.py`, and
+  `backend/normalizer/cisco_ios.py` — minimal compatibility fix required by the
+  UI flow: retain the operator-approved parsed value and apply a learned
+  canonical field to the normalized configuration when the audit resumes.
+
+### Validation Results
+
+- `cd frontend && npm run typecheck`: **passed**.
+- `cd frontend && npm run build`: **passed** with Next.js 16.2.6; all new static
+  and dynamic Valsec routes compiled and prerendered/registered successfully.
+- No frontend lint script is defined in `frontend/package.json`.
+- Focused backend compatibility suite:
+  `pytest tests/test_training.py tests/test_training_integration.py
+  tests/test_cisco_ios_normalizer.py tests/test_config_router.py -q`:
+  **37 passed**.
+- Learned-mapping resume smoke test: **passed**; an approved `ssh.version` value
+  was applied to the normalized schema with `mapping_source=learned_mapping`.
+- `git diff --check`: **passed**.
+
+### Remaining Issues
+
+- The backend unverified endpoint and training ownership gaps recorded here were
+  resolved in the hardening pass below.
+- The existing `/scan/*` and `/scans` legacy routes/files remain in place and
+  untouched. The Valsec navigation and required workflow use only `/configs/*`.
+- The legacy scan PDF remains separate. Valsec config audits now use the dedicated
+  compliance renderer described below.
+
+---
+
+## Implementation Update: Training Security, Compliance PDF, and Real E2E (2026-09-12)
+
+### Changes Completed
+
+- `backend/routers/training.py`
+  - `GET /api/configs/{id}/unverified` now returns `finding_id`,
+    `raw_source_line`, `line_number`, `schema_field`, `ai_suggested_field`,
+    `ai_suggested_schema_field`, and `ai_confidence`. The original `id` remains
+    for compatibility with the completed Nimbus frontend.
+  - AI fields are populated only for a persisted `mapping_source=ai_proposal`;
+    parser-only unknowns return `null` rather than fabricated suggestions.
+  - Both training endpoints now use the config router's existing authentication
+    and ownership boundary. The POST finding query also constrains both finding
+    ID and config ID, preventing cross-config training.
+  - Learned examples retain both the source line and operator-approved parsed
+    value so a resumed or subsequent audit can apply the mapping to the typed
+    normalized schema.
+- `backend/training/matcher.py` and `backend/normalizer/cisco_ios.py`
+  - Previously approved mappings can read the stored parsed value, remain
+    backward compatible with old string-only examples, and apply valid canonical
+    fields as `confirmed` findings. Unknown/non-schema mappings remain trace-only
+    and cannot affect compliance evaluation.
+- `backend/reports/compliance_generator.py`
+  - Added a dedicated Valsec compliance PDF renderer, separate from the legacy
+    scanner report.
+- `backend/reports/templates/compliance_report.html`
+  - Added device/vendor/OS/firmware, CIS benchmark/version, score, PASS/FAIL/N/A
+    totals, failed-control severity counts, control ID/title, requirement,
+    observed value, exact Cisco CLI remediation, and an explicit operator-review
+    marker for AI fallback remediation.
+  - Removed ONUS, VAPT, CVSS, and OWASP language from the config-audit report.
+- `backend/tasks/audit_orchestrator.py`
+  - Config audits now generate the dedicated Valsec compliance PDF while keeping
+    deterministic CIS results as the only source of PASS/FAIL/N/A.
+- `backend/routers/configs.py`
+  - PDF downloads use a Valsec compliance filename.
+- `backend/tests/test_valsec_hardening.py`
+  - Added focused coverage for real/null AI proposal fields, ownership rejection
+    for both training endpoints, PDF content and legacy-term removal, fallback
+    marking, first-audit resume, and second-audit mapping reuse.
+
+No frontend files were changed during this hardening pass.
+
+### Actual Verification Results
+
+- Focused Valsec suite:
+  `python3 -m pytest tests/test_valsec_hardening.py tests/test_config_router.py
+  tests/test_audit_orchestrator.py tests/test_training.py
+  tests/test_training_integration.py tests/test_cisco_ios_normalizer.py
+  tests/test_cis_engine.py tests/test_remediation_generator.py -q`:
+  **81 passed**, with 8 dependency/existing UTC deprecation warnings.
+- Real infrastructure verification used Docker Compose PostgreSQL 16 and Redis 7,
+  Alembic through revision `f8c2a9d4e761`, and real local Uvicorn and Celery
+  processes connected to those containers.
+- First HTTP audit (`7369d4e6-08f7-41b7-9bc1-0e546a416ab9`): upload returned
+  `queued`; Celery entered `normalising` and returned `awaiting_training` with one
+  unverified line. GET returned finding `187ca46a-a00a-4a77-9064-a47f55f11323`,
+  source line `vendor secure-shell generation 2`, line 30, and null AI proposal
+  fields. POST trained it as `ssh.version=2`, reported zero remaining items, and
+  dispatched `resume_config_audit`. The worker resolved it as
+  `mapping_source=learned_mapping`, ran the deterministic CIS check and
+  remediation/report stages, then completed with score 90.48.
+- PostgreSQL confirmed one learned mapping with signature
+  `vendor secure-shell generation .*`, confidence 1.0, and example payload
+  containing both the source line and `field_value: 2`. The resumed normalized
+  finding was `confirmed` with `schema_field=ssh.version` and value 2.
+- The first PDF endpoint returned HTTP 200, content type `application/pdf`, a
+  Valsec filename, and a 40,538-byte nine-page report. Extracted text contained
+  the required device/Cisco/IOS/CIS/score/verdict/severity/control/evidence/CLI
+  content and contained none of ONUS, VAPT, CVSS, or OWASP.
+- Second HTTP audit (`4620a197-e4d2-462e-98d2-c389261fe0ad`) contained the same
+  unknown syntax. The initial audit task resolved the persisted mapping, completed
+  directly without `awaiting_training`, returned zero unverified items, and
+  stored a `confirmed`/`learned_mapping` finding. PostgreSQL still contained one
+  mapping row, confirming reuse without retraining.
+- All required config API routes were exercised in the live flow: upload, fleet
+  list, status, unverified, train, results, and report. The fleet response listed
+  both audits as complete with their persisted totals.
+
+### Remaining Limitations
+
+- The Ollama classifier can return proposals, but the audit orchestrator does not
+  currently invoke and persist them. Therefore real parser-only unknowns correctly
+  expose null AI suggestion/confidence until an actual `ai_proposal` row exists.
+- The Cisco `exec-timeout` unit mismatch observed in this run was corrected in
+  the focused follow-up documented below.
+- The full default Compose graph was not used because `backend` depends on the
+  unrelated legacy ZAP scanner image. PostgreSQL and Redis ran in Docker, while
+  the real API and Celery worker ran from the repository against those services.
+
+### Exact Next Task
+
+Completed in the focused `exec-timeout` follow-up below.
+
+---
+
+## Implementation Update: Cisco `exec-timeout` Unit Fix (2026-09-12)
+
+### Fix
+
+- `backend/normalizer/cisco_ios.py` now interprets Cisco
+  `exec-timeout <minutes> <seconds>` in minutes. `exec-timeout 10 0` normalizes
+  to `10`; `exec-timeout 5 30` normalizes to `5.5`.
+- `backend/normalizer/schema.py` keeps the existing
+  `exec_timeout_minutes` field and allows integer or fractional numeric values.
+  Whole-minute values remain integers in serialized findings, preserving the
+  existing API/database JSON shape where practical. No migration was required.
+- `backend/compliance/cis_cisco_ios.py` accepts either integer or fractional
+  minutes in the existing deterministic maximum check. Controls 1.5.1 and 1.5.2
+  still pass at `<= 10` and fail above 10; no compliance-engine architecture or
+  verdict path changed.
+- `backend/tests/test_cisco_ios_normalizer.py` adds regression coverage for
+  `10 0`, `5 30`, and both console and VTY normalized findings.
+- `backend/tests/test_cis_engine.py` adds parser-to-rule regression coverage for
+  passing console/VTY values at or below 10 minutes and failing values above 10.
+
+No frontend, legacy scanner, API route, or database model was changed.
+
+### Verification
+
+- Requested focused suite:
+  `python3 -m pytest tests/test_cisco_ios_normalizer.py tests/test_cis_engine.py
+  tests/test_training_integration.py tests/test_audit_orchestrator.py
+  tests/test_valsec_hardening.py -q`: **61 passed**, with 8 existing
+  FastAPI/UTC deprecation warnings.
+- Hardened demo config re-evaluation: console timeout `10`, VTY timeout `10`,
+  control 1.5.1 `PASS`, control 1.5.2 `PASS`, 21 passed, 0 failed, 2 N/A, and
+  **100.0% compliance**. Its one intentional unknown training line remains and
+  is unrelated to deterministic timeout evaluation.
+
+### Remaining Limitations
+
+None within the `exec-timeout` unit-fix scope.
+
+---
+
+## Finalization Update: Demo Fixtures, Security Review, and Regression (2026-09-12)
+
+### Finalization Changes
+
+- Added three curated judge/demo fixtures under
+  `backend/tests/sample_configs/`:
+  - `cisco_hardened.cfg` completes at 100% (21 PASS, 0 FAIL, 2 N/A).
+  - `cisco_vulnerable.cfg` completes with 13 deterministic failures and exact
+    remediation for every failed control.
+  - `cisco_unseen_syntax.cfg` has exactly one unknown command, pauses for
+    training, and reaches 100% after mapping it to `ssh.version=2`.
+- Added `backend/tests/test_demo_configs.py` to lock all three fixture behaviors,
+  including learned-mapping reuse.
+- Hardened ZIP ingestion in `backend/routers/configs.py` by checking actual
+  decompressed bytes as well as ZIP metadata. Archive members remain memory-only
+  and are never extracted.
+- The upload API now rejects framework names other than
+  `cis_cisco_ios_v1`, preventing a request from being labelled as another
+  framework while the engine evaluates CIS Cisco IOS.
+- `backend/routers/training.py` now returns HTTP 409 when an owned config is not
+  in `awaiting_training`, preventing stale/complete/cancelled audits from being
+  trained through the API.
+- Training and learned-mapping logs no longer include raw CLI lines, mapping
+  signatures, or approved values. Raw configurations and source evidence remain
+  in PostgreSQL by design and must be protected operationally.
+- `backend/tasks/audit_orchestrator.py` now carries the normalized Cisco `version`
+  into `Config.firmware_version`, so the persisted audit and PDF identify the OS
+  version observed in the uploaded config.
+- `backend/main.py` development API metadata now identifies Valsec while noting
+  that legacy scanner APIs remain available.
+- PostgreSQL and Redis in `docker-compose.yml` now expose loopback-only host ports
+  5432 and 6380 for the focused Valsec demo workflow. Redis uses 6380 to avoid the
+  common host Redis port collision on 6379.
+- Replaced the obsolete scanner-first root README with Valsec setup, architecture,
+  API, demo steps, security posture, tests, and limitations. Reusable legacy
+  scanner code and documentation remain linked and untouched.
+- Added/updated focused tests for archive size/path handling, unsupported
+  framework rejection, cross-owner report access, invalid training state, OS
+  version persistence, and the three demo configurations.
+
+No frontend source or design file was changed in this finalization pass.
+
+### Real End-to-End Regression
+
+Infrastructure: Docker Compose PostgreSQL 16 and Redis 7, Alembic at head, real
+Uvicorn API, and a real Celery worker. The API and worker ran from the checkout
+against loopback-bound Docker data services, avoiding the unrelated ZAP/full
+scanner image graph.
+
+- Hardened audit `0dc94fa3-fcfe-45b5-a6fb-161bca10a0f4`:
+  - Observed `queued → normalising → compliance_check → complete`.
+  - 100.0%, 21 PASS, 0 FAIL, 2 N/A.
+  - PDF generated and downloaded: 39,268 bytes; contained Cisco IOS, version
+    17.9.4, CIS data, and no ONUS/VAPT/CVSS/OWASP terminology.
+- Vulnerable audit `94dbbd3c-5db7-4a7a-a8f4-125b880af979`:
+  - Observed `queued → compliance_check → complete`; `normalising` completed
+    between 20 ms polls and is confirmed by the task's committed code path.
+  - 0.0%, 0 PASS, 13 FAIL, 10 N/A.
+  - Every failed result returned non-empty exact Cisco CLI remediation.
+  - PDF generated and downloaded: 43,004 bytes.
+- First unseen-syntax audit `a093d2f8-eed6-4dd4-8fd4-015d9db55103`:
+  - Observed `queued → awaiting_training` with exactly one item:
+    `vendor ssh-protocol generation 2`.
+  - AI suggestion and confidence were null because no persisted proposal existed.
+  - Operator submission mapped it to `ssh.version=2`; the API reported zero
+    remaining findings and dispatched `resume_config_audit`.
+  - Observed `awaiting_training → compliance_check → complete`, 100.0%, and a
+    39,368-byte PDF.
+- Reuse audit `cc4b7c13-9e2a-435a-975f-ea865d44e852`:
+  - The identical config observed `queued → compliance_check → complete` and
+    never entered `awaiting_training`.
+  - GET unverified returned zero items; score was 100.0%; PDF was 39,359 bytes.
+- PostgreSQL confirmed one `vendor ssh-protocol generation .*` mapping with
+  `ssh.version`, confidence 1.0, and approved value 2. Both trained and reused
+  normalized findings were `confirmed` with source `learned_mapping`.
+- PostgreSQL also confirmed all four configs as complete and persisted firmware
+  versions 17.9.4/15.2 from their source configurations.
+
+### Final Automated Validation
+
+- Focused backend command documented in `README.md`: **89 passed**, with 8
+  existing FastAPI/Python UTC deprecation warnings.
+- `cd frontend && npm run typecheck`: **passed**.
+- `cd frontend && npm run build`: **passed** on Next.js 16.2.6; all Valsec and
+  retained legacy routes compiled.
+- `docker compose config --quiet`: **passed**.
+- Python compile check and `git diff --check`: **passed**.
+
+### Obsolete-Term Review
+
+Active Valsec routes, normalizer, CIS engine, remediation, training UI/client,
+demo fixtures, and compliance PDF contain no inappropriate ONUS, VAPT, CVSS, or
+OWASP branding. The `vapt` PostgreSQL database/user/password identifiers remain
+for schema/deployment compatibility. Other occurrences remain only in historical
+handoff/proposal material or the explicitly retained legacy scanner code, routes,
+frontend components, tests, and documentation; removing those would discard the
+reusable architecture that this task required preserving.
+
+### Final Security Review
+
+- **AI/verdict boundary:** verified. `backend/compliance/` imports the normalized
+  schema and CIS catalogue only. AI proposals do not persist automatically and
+  do not call or modify PASS/FAIL/N/A. Operator-approved values enter the typed
+  schema, after which the deterministic rules evaluate them.
+- **Training ownership:** verified by focused tests. Both GET and POST resolve the
+  config through the shared owner boundary; POST additionally pairs finding ID
+  with config ID and now requires `awaiting_training`.
+- **Upload/archive safety:** uploads and decompressed members are capped at 5 MiB,
+  UTF-8 decoded, and extension constrained. ZIPs must contain exactly one
+  supported text member. No archive extraction or user-controlled filesystem
+  path is used; traversal-shaped member names are covered by regression tests.
+- **Secret handling:** production/authenticated startup rejects placeholder
+  application/database secrets. Sessions use opaque HttpOnly cookies. Valsec
+  logging no longer emits raw learned CLI lines or approved values. Uploaded raw
+  configs and learned examples remain sensitive data stored in PostgreSQL for
+  traceability.
+- **Report authorization:** verified. Report lookup first uses the same owned
+  config check as status/results and returns 404 across owners.
+- **State transitions:** the required sequential flow passed with real Celery.
+  Training outside `awaiting_training` is rejected. No durable outbox or row lock
+  currently protects the narrow dispatch/concurrent-training race described
+  below.
+
+### Final Issue Classification
+
+- **P0 blockers:** none found for the local SIH demonstration.
+- **P1 issues:** learned mappings are deployment-wide rather than tenant-scoped;
+  an approved mapping from one authenticated user can affect a later user's
+  normalization. Training commits before Celery dispatch, so a broker failure in
+  that small window can leave a fully trained audit awaiting a manual task retry.
+  Concurrent submissions/tasks are not protected by a row lock or outbox.
+- **P2 issues:** Ollama proposals are implemented but not invoked/persisted by the
+  orchestrator; the default full Compose graph still includes large retained
+  scanner/ZAP dependencies; local demo credentials are intentionally weak and
+  safe only on loopback; existing FastAPI/`datetime.utcnow()` deprecation
+  warnings remain. Cross-site hosted deployments that choose
+  `SESSION_COOKIE_SAMESITE=none` need an explicit CSRF control for mutating config
+  endpoints; the documented same-origin/Lax setup does not use that posture.
+
+### Exact Final Human Actions
+
+1. Review and commit the current worktree; do not include `nimbus-2.zip` or the
+   extracted `nimbus-2/` prototype unless they are intentionally meant for source
+   control. No push has been performed.
+2. Before the judge demo, start PostgreSQL/Redis, migrate, then start Uvicorn,
+   Celery, and the production frontend using the exact commands in `README.md`.
+3. Ensure the unseen-demo mapping is absent before its first upload. On this demo
+   database only, delete the signature `vendor ssh-protocol generation .*` from
+   `learned_mappings`; then upload the unseen file once for training and once more
+   to demonstrate reuse.
+4. Keep ports 5432, 6380, 8000, and 3002 on loopback/local firewall rules. Replace
+   the demo PostgreSQL password and set a strong `SECRET_KEY` before any shared or
+   network-reachable deployment.
+5. Perform one browser walkthrough of upload, training selection, compliance
+   expansion, CLI copy, and PDF download on the presentation machine, and retain
+   the three sample configs plus a generated PDF as offline demo backups.
+
+---
+
+## High-Value Training Finalization (2026-09-12)
+
+### Changes
+
+- `backend/analysis/ollama_client.py`
+  - Added a Valsec configuration-classification entry point that batches unknown
+    lines into one Ollama `/api/chat` request.
+  - The classifier accepts only local Ollama hostnames, validates returned line
+    numbers, schema fields, JSON values, and finite confidence values in the
+    range 0–1, and returns an empty proposal set on failure.
+  - Its prompt explicitly forbids compliance verdicts and severity decisions.
+- `backend/training/matcher.py`
+  - Removed the duplicate hard-coded Ollama HTTP implementation and routes the
+    compatibility single-line classifier through the shared Ollama client.
+  - Added the supported Cisco vendor-neutral schema catalogue.
+  - Learned-mapping lookups now include the current config owner (`user_id`) as
+    well as vendor and pattern.
+- `backend/tasks/audit_orchestrator.py`
+  - Constructs the learned resolver with `Config.user_id`.
+  - After deterministic parsing and scoped learned lookup, sends remaining
+    unknown lines to Ollama as one batch.
+  - Persists valid proposals with `mapping_source=ai_proposal`, the suggested
+    schema field/value and AI confidence, while retaining
+    `confidence=unverified`. Every proposal therefore pauses at
+    `awaiting_training`; AI never confirms a mapping or reaches the CIS engine
+    without operator approval.
+  - Ollama exceptions and unavailability fall back to parser-only manual
+    training.
+- `backend/models.py` and
+  `migrations/versions/9b4f1d7e2c30_scope_learned_mappings_to_users.py`
+  - Added nullable `learned_mappings.user_id`. NULL is the local single-operator
+    scope; authenticated mappings belong to exactly one user.
+  - Replaced deployment-wide uniqueness with one partial unique index for
+    `(user_id, vendor, pattern_signature)` and one for local
+    `(vendor, pattern_signature) WHERE user_id IS NULL`.
+  - Existing rows migrate into local scope and are not exposed to authenticated
+    users.
+- `backend/routers/training.py`
+  - Mapping reads and writes now use the config owner scope.
+  - A row lock on the config serializes concurrent submissions for one audit;
+    finding and existing-mapping rows are also locked.
+  - Duplicate identical submissions are idempotent, conflicting confirmations
+    return 409, existing examples are updated without duplication, and the
+    database uniqueness constraints stop cross-audit duplicate mappings.
+  - The mapping/finding update, remaining-count check, and resume claim are one
+    transaction. The last approval moves the config to `normalising` before
+    dispatch, preventing an ordinary duplicate request from dispatching twice.
+  - If Celery dispatch fails after commit, the endpoint logs the exception,
+    restores `awaiting_training`, and returns HTTP 503 with
+    `resume_pending=true`. Retrying the same approval safely retries dispatch.
+- Focused regression coverage was added/updated in
+  `backend/tests/test_training.py`, `backend/tests/test_training_integration.py`,
+  `backend/tests/test_audit_orchestrator.py`, and
+  `backend/tests/test_valsec_hardening.py` for batching/validation, local-only
+  enforcement, proposal persistence and gating, user isolation, idempotency,
+  scoped persistence, and broker-failure recovery.
+
+No frontend or compliance-engine file was changed in this pass.
+
+### Actual Verification Results
+
+- Migration: PostgreSQL upgraded from `f8c2a9d4e761` to
+  `9b4f1d7e2c30 (head)`. PostgreSQL exposed both expected partial unique indexes.
+- Focused requested suite:
+  `python3 -m pytest tests/test_training.py tests/test_training_integration.py
+  tests/test_cisco_ios_normalizer.py tests/test_cis_engine.py
+  tests/test_audit_orchestrator.py tests/test_valsec_hardening.py -q`:
+  **85 passed**, with 9 existing FastAPI/UTC deprecation warnings.
+- Real Ollama was available locally with `qwen2.5:7b`. Audit
+  `ddd9817e-e5bd-4ccc-a838-d40026b98bab` parsed
+  `secure-shell protocol-generation 2` as unknown, then Ollama returned and the
+  orchestrator persisted `ssh.version`, value `2`, confidence `0.85` as an
+  unverified `ai_proposal`. GET `/unverified` exposed those exact persisted
+  values and the audit remained at `awaiting_training`.
+- Operator approval transactionally persisted the learned mapping, reported zero
+  remaining findings, dispatched resume through real Redis/Celery, resolved the
+  mapping as confirmed, ran deterministic CIS evaluation and PDF generation,
+  and completed at **100.0%**.
+- Reuse audit `4efbe1a6-cdf7-46c7-816a-55626714ea3d` used the same config and
+  completed directly with zero unverified findings. Worker logs show a learned
+  mapping resolution and no Ollama classification call.
+- A rolled-back real PostgreSQL application check created users A and B and a
+  user-A mapping. User A resolved it on both first and later lookups; user B and
+  local scope did not resolve it.
+- Unit tests exercised Celery dispatch failure: the confirmed finding and mapping
+  remain committed, the config returns to `awaiting_training`, and the endpoint
+  exposes a retryable 503 rather than claiming resume succeeded.
+- `git diff --check` passed. The deterministic compliance module remained
+  untouched and its AI-independence regression passed.
+
+### Remaining P1/P2 Issues
+
+- **P1:** none identified within this focused hardening scope.
+- **P2:** resume dispatch uses a recoverable API retry rather than a durable
+  transactional outbox. If the broker accepts a task but the client still sees
+  an ambiguous transport error, a retry can enqueue a duplicate idempotent audit
+  pass. A production multi-node deployment should add an outbox/dispatcher when
+  that operational complexity is justified.
+- **P2:** Ollama output quality and latency depend on the locally installed model.
+  Invalid or missing proposals deliberately fall back to manual training.
+- **P2:** pattern signatures can cover several concrete numeric values, but the
+  current learned mapping stores approved example values rather than a general
+  value-extraction transform. Operators should review novel value variants; this
+  does not let AI bypass approval or directly determine a verdict.
+
+### Exact Next Task
+
+No further implementation is required for these three gaps. The next human step
+is to review the working tree and commit the Valsec changes, including migration
+`9b4f1d7e2c30`, without committing `nimbus-2.zip` or `nimbus-2/` unless the
+prototype artifacts are intentionally retained.
+
+---
+
+## Proposal Equivalence Pass: Multi-Vendor, Fleet Ingestion, Frameworks, and AI Remediation (2026-09-12)
+
+This section supersedes older limitation statements above that described Valsec
+as Cisco-only, single-file, single-framework, or as not invoking Ollama from the
+audit orchestrator.
+
+### Implemented Changes
+
+- `backend/compliance/catalogues.py` and `backend/compliance/engine.py`
+  - Added a common immutable control/catalogue interface over the existing
+    vendor-neutral schema.
+  - Preserved all 23 Cisco CIS controls and added 11 representative Juniper CIS,
+    8 NIST SP 800-53 Rev. 5, 6 DISA Network Device STIG V1R1, and 6 ISO/IEC
+    27001:2022 Annex A controls.
+  - Missing evidence remains `NOT_APPLICABLE`; all verdict, severity, and score
+    decisions remain pure deterministic functions. The compatibility
+    `evaluate_cis_cisco_ios` entry point remains available.
+- `backend/normalizer/juniper_junos.py`
+  - Added a real JunOS adapter for `set` syntax and hierarchical brace syntax.
+    It normalizes representative system identity, encrypted root credentials,
+    management services, banners, idle timeout, SSH, centralized authentication,
+    logging, NTP, SNMPv3, LLDP, and interface-disable settings.
+  - Unknown Juniper statements use the same vendor/user-scoped learned resolver,
+    Ollama proposal, training gate, resume, and later-reuse path as Cisco.
+- `backend/normalizer/cisco_ios.py`
+  - Added explicit enabled-form parsing for finger, TCP/UDP small servers, BOOTP,
+    HTTP, HTTP secure server disablement, source routing, and CDP so confirmed
+    insecure statements become deterministic failing evidence instead of unknowns.
+- `backend/remediation/juniper_remediation.py` and
+  `backend/remediation/service.py`
+  - Added isolated, deterministic JunOS `configure ... commit and-quit` templates.
+  - Added vendor dispatch that always tries deterministic CLI first and invokes a
+    local AI remediation fallback only when no template exists.
+- `backend/analysis/ollama_client.py`
+  - Added structured local-only remediation proposals. Responses cannot set
+    verdicts/severity/scores, are bounded, and must form complete Cisco or Juniper
+    configuration blocks.
+  - Diagnostic/show output, destructive commands, and whole-section JunOS deletes
+    are rejected. Valid fallback CLI is marked `ai_generated_fallback` and always
+    requires operator review.
+- `backend/routers/configs.py`
+  - Preserved the single-config response contract and added multipart multi-file
+    and multi-member ZIP ingestion with one Config/task per member.
+  - Added Cisco/Juniper and all four framework selections to upload and response
+    metadata.
+  - Enforced `.cfg`/`.conf`/`.txt`/`.zip`, UTF-8, 5 MiB per config, 10 MiB per
+    ZIP, 25 MiB cumulative expanded content, 50-config maximum, encrypted ZIP
+    rejection, traversal-safe member paths, printable 255-character device names,
+    and no filesystem extraction.
+  - A dispatch failure marks only its Config failed and does not stop other batch
+    members. The live multipart runtime class mismatch was fixed by accepting the
+    FastAPI/Starlette upload protocol instead of relying on a class alias.
+- `backend/tasks/audit_orchestrator.py`
+  - Dispatches the selected vendor adapter and deterministic framework catalogue.
+  - Persists framework results, vendor remediation, actual AI fallback markers,
+    and one dynamic PDF without making duplicate model calls.
+  - Holds a PostgreSQL advisory lock across intermediate commits, so duplicate
+    tasks for one audit cannot concurrently replace findings/results.
+- `backend/reports/compliance_generator.py` and
+  `backend/reports/templates/compliance_report.html`
+  - Made report vendor and framework metadata dynamic while retaining device,
+    OS/firmware, framework/version, timestamp, score, PASS/FAIL/N/A, severity,
+    control, requirement, observed value, CLI, and real AI-fallback marking.
+- `frontend/lib/valsec-api.ts` and `frontend/components/valsec-console.tsx`
+  - Applied compatibility-only changes to the completed Nimbus design: working
+    Cisco/Juniper and framework selection, multi-config upload responses, dynamic
+    fleet/status/result/report labels, real proposal/confidence display, and
+    actual active framework cards. No redesign was performed.
+- `backend/tests/sample_configs/`
+  - Final demo fixtures are `cisco_hardened.cfg`, `cisco_vulnerable.cfg`,
+    `cisco_unseen_syntax.cfg`, and `juniper_hardened.conf`.
+- Focused coverage was added/updated in
+  `test_config_router.py`, `test_audit_orchestrator.py`, `test_cis_engine.py`,
+  `test_frameworks.py`, `test_cisco_ios_normalizer.py`,
+  `test_juniper_normalizer.py`, `test_remediation_generator.py`,
+  `test_training.py`, `test_training_integration.py`,
+  `test_valsec_hardening.py`, and `test_demo_configs.py`.
+- `README.md` now documents the implemented setup, demo, APIs, limits, security
+  posture, and actual representative catalogue scope.
+
+### Automated Verification
+
+- Focused Valsec suite:
+  `python3 -m pytest backend/tests/test_config_router.py
+  backend/tests/test_audit_orchestrator.py backend/tests/test_cis_engine.py
+  backend/tests/test_frameworks.py backend/tests/test_cisco_ios_normalizer.py
+  backend/tests/test_juniper_normalizer.py
+  backend/tests/test_remediation_generator.py
+  backend/tests/test_valsec_hardening.py backend/tests/test_training.py
+  backend/tests/test_training_integration.py backend/tests/test_demo_configs.py -q`:
+  **114 passed**, with 10 existing FastAPI/naive-UTC deprecation warnings.
+- Relevant Python modules compiled with `python3 -m py_compile`: **passed**.
+- `frontend`: `npm run typecheck`: **passed**.
+- `frontend`: `npm run build`: **passed** with Next.js 16.2.6. The build generated
+  `/`, `/configs`, `/configs/upload`, `/configs/[id]/status`,
+  `/configs/[id]/training`, `/configs/[id]/report`, `/training`, and
+  `/frameworks`, plus the retained legacy scanner routes.
+- `git diff --check`: **passed** after the final documentation update.
+
+### Real Docker/PostgreSQL/Redis/Celery/Ollama Verification
+
+- Docker Compose backend, worker, frontend, PostgreSQL 16, Redis 7, and retained
+  ZAP service were rebuilt and running. PostgreSQL and Redis were healthy.
+  Alembic reported `9b4f1d7e2c30 (head)`.
+- Cisco CIS hardened audit `ccb722c3-9dc5-41a5-b9f3-780ac50132ee` completed at
+  **100.0%** with 21 PASS, 0 FAIL, 2 N/A and a 39,293-byte PDF.
+- Cisco CIS vulnerable audit `ccd88b81-0c28-426a-8d12-867114304266` completed at
+  **0.0%** with 0 PASS, 13 FAIL, 10 N/A and deterministic Cisco remediation.
+- Juniper CIS hardened audit `5aef4910-6cdb-4ef4-9975-36d46ad8c2cb` completed at
+  **100.0%** with 11 PASS, 0 FAIL, 0 N/A and a 31,043-byte PDF.
+- Juniper deterministic-remediation audit
+  `f2c9dc05-d959-4d1a-9cdb-bead2ab1828d` used SSH v1, scored **90.91%**, failed
+  `JUN-2.1`, and persisted the exact non-AI CLI block:
+  `configure`, `set system services ssh protocol-version v2`,
+  `commit and-quit`.
+- A two-member ZIP produced independent ISO audits
+  `536a85b6-0ac2-4027-ba69-42ac9399c83d` (hardened, 100%) and
+  `e1e41ecc-a912-489c-9bb1-5ea8e29e10be` (vulnerable, 0%) with no dispatch
+  errors. One audit did not block or change the other.
+- NIST AI-remediation audit `27a0e4a0-3583-4b5f-91f2-1a8770b7e51d`
+  deterministically failed `CM-7`; because that representative control has no
+  vendor template, local Qwen produced a validated Cisco configuration block.
+  The result and PDF stored `is_remediation_fallback=true` and the report showed
+  `AI-GENERATED FALLBACK REMEDIATION — OPERATOR REVIEW REQUIRED`.
+- Cisco unknown-syntax audit `6ad8311f-883f-42a6-a97a-105e762319a5` persisted a
+  real local Ollama proposal `ssh.version=2` at confidence **0.95**, remained
+  unverified, paused, accepted operator training, resumed, and completed. Audit
+  `1146ed1e-c1fe-40ad-8509-7da20b6626b8` reused that approved mapping and
+  completed directly without training.
+- Juniper unknown-syntax audit `c54786db-dd61-4b08-81a3-8a2d9bb442c8` followed
+  the same path with a real `ssh.version` proposal at **0.95**, operator approval,
+  resume, and completion. Audit `1f8dc8f4-9ac9-4c47-8916-183e0fff320b` reused
+  the Juniper mapping and completed directly.
+- Live PostgreSQL isolation returned: user A/Cisco `true`, user B/Cisco `false`,
+  user A/Juniper `false`, local/Cisco `false`, and user A reuse `true`.
+- Two simultaneous audit tasks for Config
+  `6c484bd9-3038-4250-8243-346a042287cc` returned one `awaiting_training` and one
+  `already_running`; the database remained consistently `awaiting_training`.
+- Docker frontend `/` returned HTTP 200, its `/api/configs` proxy returned JSON,
+  and a STIG upload through port 3000
+  (`4a6f501c-6aa6-4380-a0dd-3dc74dbdb58e`) completed at **100%**, 6 PASS.
+- Text extracted from Cisco CIS, Juniper CIS, NIST, and AI-fallback PDFs contained
+  required Valsec/vendor/framework/verdict/evidence/remediation content and no
+  inappropriate ONUS, VAPT, CVSS, or OWASP terms.
+
+### Final Security Review
+
+- **Deterministic boundary:** AI modules are not imported by catalogue evaluators
+  and cannot write verdict, severity, or score. Unknown/unverified syntax stops
+  before framework evaluation.
+- **Authorization:** list/detail/status/results/report/training share the config
+  owner boundary when authentication is enabled; a finding is also constrained to
+  its owned Config. Cross-owner access is covered by focused tests.
+- **Mapping isolation:** partial unique indexes and all lookup/write queries scope
+  mappings by user (or the local NULL scope), vendor, and pattern signature.
+- **Ingestion:** file type/encoding/size/count, traversal, encryption, cumulative
+  expansion, and device-name checks are enforced; ZIPs are never extracted.
+- **Secrets/prompts:** config content goes only to a validated local Ollama host.
+  Prompts identify input JSON as untrusted and logs do not emit raw configuration.
+  Raw configurations are intentionally stored for audit traceability and require
+  database/backup protection.
+- **State consistency:** mapping/finding changes are transactional; training uses
+  row locks and uniqueness constraints; broker failure is explicit and recoverable;
+  duplicate audits use a PostgreSQL advisory lock.
+
+### Remaining P1/P2 Issues
+
+- **P1:** Juniper CIS and the NIST/DISA/ISO catalogues are representative working
+  control sets, not complete licensed benchmark/certification catalogues.
+- **P1:** Shared-production authentication was covered by focused ownership tests
+  and live PostgreSQL scope checks, but the current Docker E2E ran in intentional
+  local single-operator mode (`REQUIRE_AUTH=false`), not through a real hosted
+  login/session/TLS deployment.
+- **P2:** One vendor and framework apply to an upload batch; a mixed-vendor ZIP
+  must be split into separate uploads.
+- **P2:** Broker recovery is request-driven rather than a durable outbox. A failed
+  resume dispatch returns HTTP 503, restores `awaiting_training`, and requires the
+  operator to retry after Redis recovers.
+- **P2:** AI fallback remediation is deliberately review-only and may need manual
+  correction for a specific platform release.
+- **P2:** Historical PostgreSQL identifiers and retained legacy scanner/UI files
+  still contain `vapt`/ONUS/vulnerability terminology. They remain for migration
+  compatibility and reusable scanner functionality; active Valsec UI, APIs, and
+  compliance PDFs do not expose that terminology.
+
+### Exact Next Task
+
+No code task blocks the SIH demonstration. Before a shared public deployment,
+replace placeholder secrets, enable and exercise the hosted authentication/TLS
+configuration, and obtain/implement the complete licensed benchmark catalogues if
+the product will claim full framework certification rather than representative
+SIH coverage.

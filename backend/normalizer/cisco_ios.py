@@ -128,7 +128,9 @@ class CiscoIOSNormalizer:
                             context: str | None) -> bool:
         timeout = _EXEC_TIMEOUT.match(stripped)
         if timeout and context in {"line_console", "line_vty"}:
-            minutes = int(timeout.group(1)) * 60 + int(timeout.group(2) or 0)
+            whole_minutes = int(timeout.group(1))
+            seconds = int(timeout.group(2) or 0)
+            minutes = whole_minutes if seconds == 0 else whole_minutes + seconds / 60
             field = f"{context}.exec_timeout_minutes"
             self._set(result, field, minutes, raw_line, line_number)
             return True
@@ -175,13 +177,21 @@ class CiscoIOSNormalizer:
         rules: list[tuple[str, Any, str]] = [
             (r"^service\s+password-encryption$", True, "service_hardening.password_encryption"),
             (r"^no\s+service\s+password-encryption$", False, "service_hardening.password_encryption"),
+            (r"^service\s+finger$", False, "service_hardening.finger_disabled"),
             (r"^no\s+service\s+finger$", True, "service_hardening.finger_disabled"),
+            (r"^service\s+tcp-small-servers$", False, "service_hardening.tcp_small_servers_disabled"),
             (r"^no\s+service\s+tcp-small-servers$", True, "service_hardening.tcp_small_servers_disabled"),
+            (r"^service\s+udp-small-servers$", False, "service_hardening.udp_small_servers_disabled"),
             (r"^no\s+service\s+udp-small-servers$", True, "service_hardening.udp_small_servers_disabled"),
+            (r"^ip\s+bootp\s+server$", False, "service_hardening.bootp_server_disabled"),
             (r"^no\s+ip\s+bootp\s+server$", True, "service_hardening.bootp_server_disabled"),
+            (r"^ip\s+http\s+server$", False, "service_hardening.http_server_disabled"),
             (r"^no\s+ip\s+http\s+server$", True, "service_hardening.http_server_disabled"),
             (r"^ip\s+http\s+secure-server$", True, "service_hardening.http_secure_server_enabled"),
+            (r"^no\s+ip\s+http\s+secure-server$", False, "service_hardening.http_secure_server_enabled"),
+            (r"^ip\s+source-route$", False, "access_control.source_route_disabled"),
             (r"^no\s+ip\s+source-route$", True, "access_control.source_route_disabled"),
+            (r"^cdp\s+run$", False, "cdp.global_disabled"),
             (r"^no\s+cdp\s+run$", True, "cdp.global_disabled"),
             (r"^aaa\s+new-model$", True, "aaa.new_model"),
             (r"^no\s+aaa\s+new-model$", False, "aaa.new_model"),
@@ -236,6 +246,9 @@ class CiscoIOSNormalizer:
         )
         if match is None:
             return False
+        # Known canonical fields affect the configuration consumed by the CIS
+        # engine. Forward-compatible/custom fields remain traceable findings.
+        self._assign_schema_value(result, match.schema_field, match.field_value)
         result.findings.append(NormalizedFinding(
             schema_field=match.schema_field, field_value=match.field_value,
             raw_source_line=raw_line, line_number=line_number,
@@ -246,14 +259,28 @@ class CiscoIOSNormalizer:
     @staticmethod
     def _set(result: NormalizationResult, field: str, value: Any,
              raw_line: str, line_number: int) -> None:
+        CiscoIOSNormalizer._assign_schema_value(result, field, value)
+        result.findings.append(NormalizedFinding(
+            schema_field=field, field_value=value, raw_source_line=raw_line,
+            line_number=line_number, confidence=Confidence.CONFIRMED,
+            mapping_source=MappingSource.PARSER,
+        ))
+
+    @staticmethod
+    def _assign_schema_value(result: NormalizationResult, field: str, value: Any) -> bool:
         target: Any = result.config
         parts = field.split(".")
-        for part in parts[:-1]:
-            target = target[part] if isinstance(target, dict) else getattr(target, part)
+        try:
+            for part in parts[:-1]:
+                target = target[part] if isinstance(target, dict) else getattr(target, part)
+        except (AttributeError, KeyError, TypeError):
+            return False
         name = parts[-1]
         if isinstance(target, dict):
             target[name] = value
         else:
+            if not hasattr(target, name):
+                return False
             current = getattr(target, name)
             if isinstance(current, list):
                 if isinstance(value, list):
@@ -262,8 +289,4 @@ class CiscoIOSNormalizer:
                     current.append(value)
             else:
                 setattr(target, name, value)
-        result.findings.append(NormalizedFinding(
-            schema_field=field, field_value=value, raw_source_line=raw_line,
-            line_number=line_number, confidence=Confidence.CONFIRMED,
-            mapping_source=MappingSource.PARSER,
-        ))
+        return True

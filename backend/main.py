@@ -15,8 +15,8 @@ ensure_secret_key()
 validate_startup_security()
 
 app = FastAPI(
-    title="ONUS VAPT API",
-    description="ONUS - Automated Vulnerability Assessment and Penetration Testing",
+    title="Valsec Network Security API",
+    description="Cisco IOS compliance auditing with retained legacy scanner APIs.",
     version="1.0.0",
     # L1: no interactive docs / schema disclosure in a production posture.
     **({"docs_url": None, "redoc_url": None, "openapi_url": None} if is_production() else {}),

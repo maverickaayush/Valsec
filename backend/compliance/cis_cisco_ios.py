@@ -40,7 +40,7 @@ def _bool_requirement(value: bool | None, label: str) -> Evaluation:
     return FAIL, f"{label} is not configured."
 
 
-def _maximum(value: int | None, maximum: int, label: str, unit: str) -> Evaluation:
+def _maximum(value: int | float | None, maximum: int, label: str, unit: str) -> Evaluation:
     if value is None:
         return NOT_APPLICABLE, f"{label} was not observed in the normalized configuration."
     if value <= maximum:

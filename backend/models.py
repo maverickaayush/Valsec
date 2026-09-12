@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from sqlalchemy import (
     Column, String, Boolean, Integer, Enum as SAEnum,
-    DateTime, LargeBinary, ForeignKey, Text, UniqueConstraint, Float
+    DateTime, LargeBinary, ForeignKey, Text, UniqueConstraint, Float, Index, text
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
@@ -52,7 +52,7 @@ class ComplianceSeverity(str, enum.Enum):
 
 class User(Base):
     """Hosted-tier user account (routers/auth.py). Only used when
-    config.REQUIRE_AUTH is True — local/self-hosted ONUS has no users.
+    config.REQUIRE_AUTH is True — a local single-operator deployment has no users.
 
     Passwords are Argon2id hashes (security.py); the plaintext is never stored
     or logged. OTP codes and browser sessions live in Redis, not here, so this
@@ -198,6 +198,9 @@ class LearnedMapping(Base):
     __tablename__ = "learned_mappings"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # NULL is the single-operator/self-hosted scope. Authenticated deployments
+    # always bind learned syntax to the user who approved it.
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
     vendor = Column(String(64), nullable=False)
     pattern_signature = Column(Text, nullable=False)
     schema_field = Column(String(128), nullable=False)
@@ -208,7 +211,18 @@ class LearnedMapping(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=True)
 
     __table_args__ = (
-        UniqueConstraint('vendor', 'pattern_signature', name='uq_vendor_pattern'),
+        Index(
+            "uq_learned_mapping_user_vendor_pattern",
+            "user_id", "vendor", "pattern_signature",
+            unique=True,
+            postgresql_where=text("user_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_learned_mapping_local_vendor_pattern",
+            "vendor", "pattern_signature",
+            unique=True,
+            postgresql_where=text("user_id IS NULL"),
+        ),
     )
 
 
