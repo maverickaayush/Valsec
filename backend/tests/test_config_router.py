@@ -1,5 +1,6 @@
 """Focused config-router helper and upload tests without infrastructure."""
 import io
+import json
 import os
 import sys
 import zipfile
@@ -51,6 +52,40 @@ def test_upload_accepts_raw_text_creates_queued_config_and_dispatches(monkeypatc
     assert dispatched == [str(response["config_id"])]
 
 
+def test_upload_accepts_unrecognized_vendor_hint_and_preserves_it(monkeypatch):
+    db = Db()
+    dispatched = []
+    monkeypatch.setattr(configs, "_current_user", lambda *_: None)
+    from tasks.audit_orchestrator import run_config_audit
+    monkeypatch.setattr(run_config_audit, "delay", lambda config_id: dispatched.append(config_id))
+
+    response = configs.upload_config(
+        None, None, "set system unfamiliar-setting yes", "  Acme EdgeOS  ",
+        "nist_sp_800_53_rev5", "acme-device", db,
+    )
+
+    config = db.added[0]
+    assert response["status"] == "queued"
+    assert config.vendor == "Acme EdgeOS"
+    assert config.os_type == "unknown"
+    assert config.selected_framework == "nist_sp_800_53_rev5"
+    assert dispatched == [str(response["config_id"])]
+
+
+def test_unrecognized_vendor_defaults_to_vendor_neutral_framework(monkeypatch):
+    db = Db()
+    monkeypatch.setattr(configs, "_current_user", lambda *_: None)
+    from tasks.audit_orchestrator import run_config_audit
+    monkeypatch.setattr(run_config_audit, "delay", lambda *_: None)
+
+    configs.upload_config(
+        None, None, "future vendor syntax", "Acme EdgeOS", None, None, db
+    )
+
+    assert db.added[0].selected_framework == "nist_sp_800_53_rev5"
+    assert db.added[0].vendor == "Acme EdgeOS"
+
+
 def test_upload_file_validation_and_zip_extraction():
     valid = UploadFile(filename="router.cfg", file=io.BytesIO(b"hostname edge\n"))
     assert configs._extract_upload(valid) == ("hostname edge\n", "router")
@@ -84,6 +119,120 @@ def test_multi_member_zip_creates_independent_device_audits(monkeypatch):
     assert [item.device_name for item in db.added] == ["core", "edge"]
     assert all(item.selected_framework == "nist_sp_800_53_rev5" for item in db.added)
     assert dispatched == [str(item.id) for item in db.added]
+
+
+def test_vendor_detection_distinguishes_cisco_juniper_fortinet_and_unknown():
+    assert configs.detect_config_vendor("hostname edge\ninterface GigabitEthernet0/0") == "cisco"
+    assert configs.detect_config_vendor("set system host-name edge") == "juniper"
+    assert configs.detect_config_vendor("config system global\n set hostname edge\nend") == "fortinet"
+    assert configs.detect_config_vendor("set allowaccess custom-secure-protocol") is None
+    assert configs.detect_config_vendor("acme secure-widget enabled") is None
+
+
+def test_mixed_zip_detects_fortinet_and_routes_unknown_separately(monkeypatch):
+    db = Db()
+    dispatched = []
+    monkeypatch.setattr(configs, "_current_user", lambda *_: None)
+    from tasks.audit_orchestrator import run_config_audit
+    monkeypatch.setattr(run_config_audit, "delay", lambda config_id: dispatched.append(config_id))
+    response = configs.upload_config(
+        None,
+        file=_zip_upload([
+            ("cisco.cfg", "hostname core\ninterface GigabitEthernet0/0\n"),
+            ("juniper.conf", "set system host-name spine\n"),
+            ("fortigate.conf", "config system global\n set hostname firewall\nend\n"),
+            ("acme.cfg", "acme secure-widget enabled\n"),
+        ]),
+        vendor="Acme EdgeOS",
+        framework="cis_cisco_ios_v1",
+        vendor_hints=json.dumps({"acme.cfg": "Acme EdgeOS"}),
+        db=db,
+    )
+    assert response["total"] == 4
+    assert [config.vendor for config in db.added] == ["cisco", "juniper", "fortinet", "Acme EdgeOS"]
+    assert [config.os_type for config in db.added] == ["ios", "junos", "fortios", "unknown"]
+    assert [config.selected_framework for config in db.added] == [
+        "cis_cisco_ios_v1", "cis_cisco_ios_v1", "nist_sp_800_53_rev5", "nist_sp_800_53_rev5",
+    ]
+    assert dispatched == [str(config.id) for config in db.added]
+
+
+def test_mixed_vendor_zip_detects_each_file_and_keeps_unknown_isolated(monkeypatch):
+    db = Db()
+    dispatched = []
+    monkeypatch.setattr(configs, "_current_user", lambda *_: None)
+    from tasks.audit_orchestrator import run_config_audit
+    monkeypatch.setattr(run_config_audit, "delay", lambda config_id: dispatched.append(config_id))
+    upload = _zip_upload([
+        ("cisco.cfg", "hostname core\ninterface GigabitEthernet0/0\n"),
+        ("juniper.conf", "set system host-name spine\nset system services ssh\n"),
+        ("acme-edgeos.cfg", "acme-security-policy strict\n"),
+        ("other.cfg", "edge-feature enabled\n"),
+    ])
+
+    response = configs.upload_config(
+        None,
+        file=upload,
+        vendor="Acme EdgeOS",
+        framework="cis_cisco_ios_v1",
+        vendor_hints=json.dumps({"other.cfg": "Other Networks OS"}),
+        db=db,
+    )
+
+    assert response["total"] == 4
+    assert [(config.vendor, config.os_type, config.selected_framework) for config in db.added] == [
+        ("cisco", "ios", "cis_cisco_ios_v1"),
+        ("juniper", "junos", "cis_cisco_ios_v1"),
+        ("Acme EdgeOS", "unknown", "nist_sp_800_53_rev5"),
+        ("Other Networks OS", "unknown", "nist_sp_800_53_rev5"),
+    ]
+    assert dispatched == [str(config.id) for config in db.added]
+
+
+def test_multipart_files_are_vendor_detected_independently(monkeypatch):
+    db = Db()
+    dispatched = []
+    monkeypatch.setattr(configs, "_current_user", lambda *_: None)
+    from tasks.audit_orchestrator import run_config_audit
+    monkeypatch.setattr(run_config_audit, "delay", lambda config_id: dispatched.append(config_id))
+
+    response = configs.upload_config(
+        None,
+        vendor="Acme EdgeOS",
+        framework="nist_sp_800_53_rev5",
+        files=[
+            UploadFile(filename="core.cfg", file=io.BytesIO(b"hostname core\ninterface Ethernet0/0\n")),
+            UploadFile(filename="spine.conf", file=io.BytesIO(b"set system host-name spine\n")),
+            UploadFile(filename="acme.cfg", file=io.BytesIO(b"acme feature enabled\n")),
+        ],
+        vendor_hints=json.dumps({"acme.cfg": "Acme EdgeOS"}),
+        db=db,
+    )
+
+    assert response["total"] == 3
+    assert [config.vendor for config in db.added] == ["cisco", "juniper", "Acme EdgeOS"]
+    assert [config.status for config in db.added] == [ConfigStatus.queued] * 3
+    assert dispatched == [str(config.id) for config in db.added]
+
+
+def test_vendor_hint_isolation_and_zip_safety_remain_enforced(monkeypatch):
+    db = Db()
+    monkeypatch.setattr(configs, "_current_user", lambda *_: None)
+    from tasks.audit_orchestrator import run_config_audit
+    monkeypatch.setattr(run_config_audit, "delay", lambda *_: None)
+    upload = _zip_upload([
+        ("nested/same.cfg", "unknown syntax one\n"),
+        ("other.cfg", "unknown syntax two\n"),
+    ])
+    configs.upload_config(
+        None, file=upload, vendor="Fallback Vendor", framework="nist_sp_800_53_rev5",
+        vendor_hints=json.dumps({"nested/same.cfg": "Acme OS", "other.cfg": "Different OS"}), db=db,
+    )
+    assert [config.vendor for config in db.added] == ["Acme OS", "Different OS"]
+
+    unsafe = _zip_upload([("../escape.cfg", "unknown syntax\n")])
+    with pytest.raises(HTTPException, match="unsafe member path"):
+        configs.upload_config(None, file=unsafe, vendor="Fallback Vendor", db=Db())
 
 
 def test_one_dispatch_failure_does_not_stop_other_batch_items(monkeypatch):
@@ -130,13 +279,20 @@ def test_zip_upload_is_size_bounded_and_never_uses_member_path(tmp_path):
 def test_progress_covers_lifecycle_and_invalid_inputs_are_rejected():
     config = Config(status=ConfigStatus.compliance_check)
     assert configs._progress(config) == 70
-    with pytest.raises(HTTPException, match="Supported vendors"):
-        configs.upload_config(None, None, "hostname edge", "fortinet", "cis_cisco_ios_v1", None, Db())
+    with pytest.raises(HTTPException, match="vendor-specific"):
+        configs.upload_config(None, None, "fortinet-specific syntax", "fortinet", "cis_cisco_ios_v1", None, Db())
+    with pytest.raises(HTTPException, match="Vendor must"):
+        configs.upload_config(None, None, "hostname edge", "bad\nvendor", "nist_sp_800_53_rev5", None, Db())
     with pytest.raises(HTTPException, match="Unsupported compliance framework"):
         configs.upload_config(None, None, "hostname edge", "cisco", "made_up", None, Db())
     with pytest.raises(HTTPException, match="Device name"):
         configs.upload_config(
             None, None, "hostname edge", "cisco", "cis_cisco_ios_v1", "x" * 256, Db()
+        )
+    with pytest.raises(HTTPException, match="Fortinet FortiOS currently supports"):
+        configs.upload_config(
+            None, None, "config system global\n set hostname fgt\nend", "fortinet",
+            "iso_iec_27001_2022", None, Db(), vendor_hints=None,
         )
 
 

@@ -9,7 +9,7 @@ export type ConfigStatus =
 
 export type Verdict = 'PASS' | 'FAIL' | 'NOT_APPLICABLE'
 export type ComplianceSeverity = 'Critical' | 'High' | 'Medium' | 'Low' | 'Informational'
-export type ConfigVendor = 'cisco' | 'juniper'
+export type ConfigVendor = string
 export type FrameworkKey = 'cis_cisco_ios_v1' | 'nist_sp_800_53_rev5' | 'disa_stig_network_v1' | 'iso_iec_27001_2022'
 
 export interface ConfigListItem {
@@ -63,6 +63,7 @@ export interface ConfigStatusResponse {
 }
 
 export interface ComplianceResult {
+  id: string
   control_id: string
   framework: string
   title: string
@@ -72,6 +73,131 @@ export interface ComplianceResult {
   observed_value: string | null
   remediation_cli: string | null
   is_remediation_fallback: boolean
+  remediation_action: RemediationActionSummary | null
+}
+
+export type RemediationActionStatus = 'proposed' | 'approved' | 'applying' | 'applied' | 'failed'
+
+export interface RemediationActionSummary {
+  id: string
+  status: RemediationActionStatus
+  risky: boolean
+  diff_summary: string | null
+  failure_message: string | null
+}
+
+export interface DevicePullRequest {
+  host: string
+  port: number
+  username: string
+  password: string
+  vendor: ConfigVendor
+  framework: FrameworkKey
+  device_name: string
+}
+
+export interface SeedDiscoveryRequest {
+  host: string
+  port: number
+  username: string
+  password: string
+  vendor: string
+}
+
+export interface DiscoveredNeighbor {
+  address: string
+  mac_address: string | null
+  interface: string | null
+  sources: string[]
+  vendor_hint: string | null
+  system_name: string | null
+}
+
+export interface NeighborDiscoveryResponse {
+  seed_host: string
+  neighbors: DiscoveredNeighbor[]
+  notice: string
+}
+
+export type DiscoveryDeviceStatus = 'discovered' | 'needs_input' | 'pulling' | 'audit_queued' | 'failed' | 'skipped'
+export type DiscoverySessionStatus = 'running' | 'awaiting_input' | 'complete' | 'partial' | 'failed'
+
+export interface DiscoveryDevice {
+  id: string
+  address: string
+  parent_address: string
+  mac_address: string | null
+  interface: string | null
+  vendor_hint: string | null
+  platform_hint: string | null
+  discovery_sources: string[]
+  raw_evidence: Record<string, string>
+  depth: number
+  status: DiscoveryDeviceStatus
+  error_message: string | null
+  config_id: string | null
+  audit_status: ConfigStatus | null
+}
+
+export interface DiscoverySessionResponse {
+  session_id: string
+  seed_host: string
+  seed_vendor: string
+  status: DiscoverySessionStatus
+  max_depth: number
+  max_devices: number
+  created_at: string
+  completed_at: string | null
+  devices: DiscoveryDevice[]
+}
+
+export interface DiscoveryDeviceProcessRequest {
+  port: number
+  username: string
+  password: string
+  transport: 'ssh' | 'telnet'
+  vendor: string
+  framework: FrameworkKey
+  device_name: string
+}
+
+export interface DiscoveredDevicePullRequest {
+  seed: SeedDiscoveryRequest
+  address: string
+  port: number
+  username: string
+  password: string
+  transport: 'ssh' | 'telnet'
+  vendor: string
+  framework: FrameworkKey
+  device_name: string
+}
+
+export interface RemediationApprovalResponse {
+  action_id: string
+  finding_id: string
+  status: RemediationActionStatus
+  risky: boolean
+  remediation_text: string
+}
+
+export interface RemediationApplyRequest {
+  host: string
+  port: number
+  username: string
+  password: string
+  confirm_risky: boolean
+}
+
+export interface RemediationApplyResponse {
+  action_id: string
+  finding_id: string
+  status: 'applied'
+  risky: boolean
+  pre_change_snapshot: string
+  post_change_snapshot: string
+  diff_summary: string
+  message: string
 }
 
 export interface ConfigResultsResponse {
@@ -95,6 +221,7 @@ export interface UnverifiedLine {
   raw_source_line: string
   line_number: number | null
   schema_field: string
+  confidence: 'probable' | 'unverified'
   ai_suggested_field?: string | null
   ai_suggested_schema_field?: string | null
   ai_confidence?: number | null
@@ -143,17 +270,72 @@ async function handle<T>(response: Response): Promise<T> {
 }
 
 export async function uploadConfig(
-  file: File,
+  files: File | File[],
   deviceName?: string,
   vendor: ConfigVendor = 'cisco',
   framework: FrameworkKey = 'cis_cisco_ios_v1',
+  vendorHints?: Record<string, string>,
 ): Promise<UploadResponse> {
   const form = new FormData()
-  form.set('file', file)
+  const uploads = Array.isArray(files) ? files : [files]
+  if (!uploads.length) throw new Error('Choose at least one configuration file.')
+  form.set('file', uploads[0])
+  for (const file of uploads.slice(1)) form.append('files', file)
   form.set('vendor', vendor)
   form.set('framework', framework)
+  if (vendorHints && Object.keys(vendorHints).length) form.set('vendor_hints', JSON.stringify(vendorHints))
   if (deviceName?.trim()) form.set('device_name', deviceName.trim())
   return handle<UploadResponse>(await fetch('/api/configs/upload', { method: 'POST', body: form }))
+}
+
+export async function pullDevice(request: DevicePullRequest): Promise<UploadResponse> {
+  return handle<UploadResponse>(await fetch('/api/configs/pull-device', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  }))
+}
+
+export async function discoverNeighbors(request: SeedDiscoveryRequest): Promise<NeighborDiscoveryResponse> {
+  return handle<NeighborDiscoveryResponse>(await fetch('/api/configs/discover-neighbors', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request),
+  }))
+}
+
+export async function pullDiscoveredDevice(request: DiscoveredDevicePullRequest): Promise<UploadResponse> {
+  return handle<UploadResponse>(await fetch('/api/configs/pull-discovered-device', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request),
+  }))
+}
+
+export async function startDiscoverySession(request: {
+  seed: SeedDiscoveryRequest
+  framework: FrameworkKey
+  max_depth: number
+  max_devices: number
+  reuse_seed_credentials: boolean
+}): Promise<DiscoverySessionResponse> {
+  return handle<DiscoverySessionResponse>(await fetch('/api/configs/discovery-sessions', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request),
+  }))
+}
+
+export async function getDiscoverySession(id: string): Promise<DiscoverySessionResponse> {
+  return handle<DiscoverySessionResponse>(await fetch(`/api/configs/discovery-sessions/${id}`, { cache: 'no-store' }))
+}
+
+export async function processDiscoveryDevice(
+  sessionId: string, deviceId: string, request: DiscoveryDeviceProcessRequest,
+): Promise<DiscoveryDevice> {
+  return handle<DiscoveryDevice>(await fetch(`/api/configs/discovery-sessions/${sessionId}/devices/${deviceId}/process`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request),
+  }))
+}
+
+export async function skipDiscoveryDevice(sessionId: string, deviceId: string): Promise<DiscoveryDevice> {
+  return handle<DiscoveryDevice>(await fetch(`/api/configs/discovery-sessions/${sessionId}/devices/${deviceId}/skip`, {
+    method: 'POST',
+  }))
 }
 
 export async function getConfigs(params: { search?: string; status?: ConfigStatus; page_size?: number } = {}): Promise<ConfigListResponse> {
@@ -178,6 +360,24 @@ export async function getUnverified(id: string): Promise<UnverifiedResponse> {
 
 export async function trainFinding(id: string, request: TrainingRequest): Promise<TrainingResponse> {
   return handle<TrainingResponse>(await fetch(`/api/configs/${id}/train`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  }))
+}
+
+export async function approveRemediation(configId: string, findingId: string): Promise<RemediationApprovalResponse> {
+  return handle<RemediationApprovalResponse>(await fetch(`/api/configs/${configId}/findings/${findingId}/approve-remediation`, {
+    method: 'POST',
+  }))
+}
+
+export async function applyRemediation(
+  configId: string,
+  findingId: string,
+  request: RemediationApplyRequest,
+): Promise<RemediationApplyResponse> {
+  return handle<RemediationApplyResponse>(await fetch(`/api/configs/${configId}/findings/${findingId}/apply-remediation`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request),

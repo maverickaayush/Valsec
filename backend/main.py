@@ -2,11 +2,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import settings, validate_startup_security, ensure_secret_key, is_production
-from routers.scan import router as scan_router
-from routers.report import router as report_router
-from routers.verify import router as verify_router
 from routers.auth import router as auth_router
 from routers.configs import router as configs_router
+from routers.device_access import router as device_access_router
 from routers.training import router as training_router
 
 # Refuse to boot with default secrets in a production posture (no-op warning for
@@ -16,7 +14,7 @@ validate_startup_security()
 
 app = FastAPI(
     title="Valsec Network Security API",
-    description="Cisco IOS compliance auditing with retained legacy scanner APIs.",
+    description="Deterministic multi-vendor network configuration compliance auditing.",
     version="1.0.0",
     # L1: no interactive docs / schema disclosure in a production posture.
     **({"docs_url": None, "redoc_url": None, "openapi_url": None} if is_production() else {}),
@@ -30,9 +28,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(scan_router)
-app.include_router(report_router)
-app.include_router(verify_router)
 app.include_router(auth_router)
+app.include_router(device_access_router)
 app.include_router(configs_router)
 app.include_router(training_router)

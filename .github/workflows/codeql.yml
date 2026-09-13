@@ -1,8 +1,6 @@
 name: CodeQL
 
-# Static security analysis for a security tool's own code — the credibility bar
-# the review (Part 6/10 #5) flags Dependabot alone doesn't meet. Scans the Python
-# backend and the TypeScript frontend for injectable/vulnerable code patterns.
+# Static analysis for the Python backend and TypeScript frontend.
 
 on:
   push:

@@ -44,6 +44,7 @@ class ServiceHardening:
     bootp_server_disabled: bool | None = None
     http_server_disabled: bool | None = None
     http_secure_server_enabled: bool | None = None
+    strong_crypto_enabled: bool | None = None
 
 
 @dataclass
@@ -81,6 +82,7 @@ class AAA:
 
 @dataclass
 class Logging:
+    enabled: bool | None = None
     buffered_size: int | None = None
     trap_severity: str | None = None
     timestamps_enabled: bool | None = None
@@ -94,6 +96,7 @@ class SNMP:
 
 @dataclass
 class NTP:
+    enabled: bool | None = None
     servers: list[str] = field(default_factory=list)
     authenticate: bool | None = None
 
@@ -115,6 +118,22 @@ class InterfaceSettings:
 
 
 @dataclass
+class FirewallPolicy:
+    """Vendor-neutral evidence retained for an ordered firewall policy."""
+
+    policy_id: str
+    name: str | None = None
+    source_interfaces: list[str] = field(default_factory=list)
+    destination_interfaces: list[str] = field(default_factory=list)
+    source_addresses: list[str] = field(default_factory=list)
+    destination_addresses: list[str] = field(default_factory=list)
+    services: list[str] = field(default_factory=list)
+    action: str | None = None
+    enabled: bool = True
+    logging_enabled: bool | None = None
+
+
+@dataclass
 class VendorNeutralConfig:
     device_info: DeviceInfo = field(default_factory=DeviceInfo)
     service_hardening: ServiceHardening = field(default_factory=ServiceHardening)
@@ -128,6 +147,7 @@ class VendorNeutralConfig:
     ntp: NTP = field(default_factory=NTP)
     cdp: CDP = field(default_factory=CDP)
     interfaces: dict[str, InterfaceSettings] = field(default_factory=dict)
+    firewall_policies: dict[str, FirewallPolicy] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Return JSON-compatible data suitable for later rule evaluation."""

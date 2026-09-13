@@ -6,6 +6,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from remediation.cisco_remediation import _TEMPLATES, generate_remediation
 from remediation.juniper_remediation import generate_juniper_remediation
+from remediation.fortios_remediation import generate_fortios_remediation
 from remediation.service import deterministic_remediation, resolve_remediation
 
 
@@ -52,6 +53,40 @@ def test_vendor_dispatch_uses_deterministic_template_before_ai(monkeypatch):
     })()
     assert "ip ssh version 2" in resolve_remediation("cisco", "ios", result).cli
     assert "protocol-version v2" in resolve_remediation("juniper", "junos", result).cli
+
+
+def test_fortios_templates_are_exact_cli_and_dispatched_before_ai(monkeypatch):
+    monkeypatch.setattr(
+        "remediation.service.propose_config_remediation",
+        lambda **_: (_ for _ in ()).throw(AssertionError("AI must not run")),
+    )
+    result = type("Result", (), {
+        "remediation_reference": "fortios.management.secure",
+        "framework": "NIST SP 800-53 Rev. 5", "control_id": "AC-17",
+        "title": "Secure administration", "observed_detail": "HTTP is enabled.",
+    })()
+    remediation = resolve_remediation("fortinet", "fortios", result)
+    assert remediation.is_fallback is False
+    assert "config system interface" in remediation.cli
+    assert "set allowaccess ping https ssh" in remediation.cli
+    assert "set logtraffic all" in generate_fortios_remediation("fortios.policy.logging").cli
+
+
+def test_fortios_missing_template_uses_explicit_local_ai_fallback(monkeypatch):
+    monkeypatch.setattr(
+        "remediation.service.propose_config_remediation",
+        lambda **kwargs: "config system admin\n edit admin\n  set password <STRONG_PASSWORD>\n next\nend"
+        if kwargs["vendor"] == "fortinet" else None,
+    )
+    result = type("Result", (), {
+        "remediation_reference": "fortios.password.encryption",
+        "framework": "NIST SP 800-53 Rev. 5", "control_id": "IA-5",
+        "title": "Protect stored administrator credentials", "observed_detail": "Plaintext password.",
+    })()
+    remediation = resolve_remediation("fortinet", "fortios", result)
+    assert remediation.is_fallback is True
+    assert remediation.source == "ai_generated_fallback"
+    assert "config system admin" in remediation.cli
 
 
 def test_missing_template_uses_marked_local_ai_fallback(monkeypatch):

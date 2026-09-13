@@ -1,5 +1,9 @@
 """Deterministic multi-framework catalogue tests."""
-from compliance.catalogues import FRAMEWORKS, get_controls, get_framework_metadata
+import pytest
+
+from compliance.catalogues import (
+    FRAMEWORKS, UnsupportedFrameworkVendorError, get_controls, get_framework_metadata,
+)
 from compliance.engine import ComplianceVerdict, evaluate_compliance
 from tests.test_cis_engine import compliant_config
 
@@ -42,3 +46,12 @@ def test_missing_evidence_remains_not_applicable_across_frameworks():
         assert report.total_passed == 0
         assert report.total_failed == 0
         assert report.total_na == len(report.results)
+
+
+def test_fortinet_has_a_real_nist_catalogue_and_rejects_unsupported_catalogues():
+    from normalizer.schema import VendorNeutralConfig
+    report = evaluate_compliance(VendorNeutralConfig(), "nist_sp_800_53_rev5", "fortinet")
+    assert len(report.results) == 7
+    assert all(result.framework == "NIST SP 800-53 Rev. 5" for result in report.results)
+    with pytest.raises(UnsupportedFrameworkVendorError, match="not implemented for Fortinet"):
+        evaluate_compliance(VendorNeutralConfig(), "cis_cisco_ios_v1", "fortinet")

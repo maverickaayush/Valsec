@@ -37,6 +37,10 @@ class FrameworkMetadata:
         return f"{self.title} {self.version}"
 
 
+class UnsupportedFrameworkVendorError(ValueError):
+    """Raised instead of evaluating a vendor against an unrelated catalogue."""
+
+
 FRAMEWORKS = {
     "cis_cisco_ios_v1": FrameworkMetadata("cis_cisco_ios_v1", "CIS Benchmark", "v1.0.0"),
     "nist_sp_800_53_rev5": FrameworkMetadata("nist_sp_800_53_rev5", "NIST SP 800-53", "Rev. 5"),
@@ -125,6 +129,35 @@ def _least_functionality(config: VendorNeutralConfig) -> Evaluation:
     return FAIL, "One or more unnecessary clear-text services are not confirmed disabled."
 
 
+def _fortinet_secure_management(config: VendorNeutralConfig) -> Evaluation:
+    protocols = {value.lower() for value in config.line_vty.transport_input}
+    if not protocols:
+        return _missing("FortiGate administrative access protocols")
+    insecure = protocols & {"http", "telnet"}
+    secure = protocols & {"ssh", "https"}
+    if secure and not insecure:
+        return PASS, f"Administrative access uses secure protocols: {', '.join(sorted(secure))}."
+    return FAIL, f"Administrative access permits insecure protocols: {', '.join(sorted(insecure or protocols))}."
+
+
+def _fortinet_ntp(config: VendorNeutralConfig) -> Evaluation:
+    if config.ntp.enabled is None and not config.ntp.servers:
+        return _missing("FortiGate NTP synchronization")
+    if config.ntp.enabled and config.ntp.servers:
+        return PASS, f"NTP synchronization is enabled with: {', '.join(config.ntp.servers)}."
+    return FAIL, "NTP synchronization is disabled or has no configured server."
+
+
+def _fortinet_policy_logging(config: VendorNeutralConfig) -> Evaluation:
+    policies = [policy for policy in config.firewall_policies.values() if policy.enabled and policy.action == "accept"]
+    if not policies:
+        return _missing("Enabled accepting firewall policies")
+    missing = [policy.policy_id for policy in policies if policy.logging_enabled is not True]
+    if not missing:
+        return PASS, "Traffic logging is enabled on every enabled accepting firewall policy."
+    return FAIL, f"Traffic logging is not enabled on firewall policies: {', '.join(missing)}."
+
+
 def _control(control_id: str, title: str, framework: str, severity: str,
              evaluator: Evaluator, remediation_reference: str) -> Control:
     return Control(control_id, title, framework, severity, evaluator, remediation_reference)
@@ -159,6 +192,17 @@ NIST_CONTROLS = (
 )
 
 
+FORTINET_NIST_CONTROLS = (
+    _control("AC-12", "Terminate inactive administrative sessions", _NIST, "Medium", lambda c: _max(c.line_vty.exec_timeout_minutes, 10, "Administrative session timeout", "minutes"), "fortios.session.timeout"),
+    _control("AC-17", "Restrict remote administration to encrypted protocols", _NIST, "High", _fortinet_secure_management, "fortios.management.secure"),
+    _control("IA-5", "Protect stored administrator credentials", _NIST, "High", lambda c: _required_bool(c.service_hardening.password_encryption, "Encrypted administrator password storage"), "fortios.password.encryption"),
+    _control("SC-13", "Use strong cryptography for administrative services", _NIST, "High", lambda c: _required_bool(c.service_hardening.strong_crypto_enabled, "FortiOS strong cryptography"), "fortios.strong_crypto"),
+    _control("AU-2", "Enable system event logging", _NIST, "Medium", lambda c: _required_bool(c.logging.enabled, "FortiOS logging"), "fortios.logging.enabled"),
+    _control("AU-12", "Log traffic accepted by firewall policies", _NIST, "High", _fortinet_policy_logging, "fortios.policy.logging"),
+    _control("SC-45", "Synchronize time with an authoritative source", _NIST, "Medium", _fortinet_ntp, "fortios.ntp"),
+)
+
+
 _STIG = "DISA Network Device Management Security Requirements Guide V1R1"
 STIG_CONTROLS = (
     _control("V-243075", "Use approved encryption for remote administrative access", _STIG, "High", _ssh2, "ssh.version"),
@@ -184,14 +228,30 @@ ISO_CONTROLS = (
 def get_framework_metadata(framework_key: str, vendor: str) -> FrameworkMetadata:
     metadata = FRAMEWORKS[framework_key]
     if framework_key == "cis_cisco_ios_v1":
-        title = "CIS Cisco IOS Benchmark" if vendor == "cisco" else "CIS Juniper JunOS Benchmark"
+        title = {
+            "cisco": "CIS Cisco IOS Benchmark",
+            "juniper": "CIS Juniper JunOS Benchmark",
+        }.get(vendor.casefold(), metadata.title)
         return FrameworkMetadata(metadata.key, title, metadata.version)
     return metadata
 
 
 def get_controls(framework_key: str, vendor: str):
+    vendor = vendor.casefold()
+    if vendor == "fortinet":
+        if framework_key != "nist_sp_800_53_rev5":
+            raise UnsupportedFrameworkVendorError(
+                f"{framework_key} is not implemented for Fortinet FortiOS; use nist_sp_800_53_rev5"
+            )
+        return FORTINET_NIST_CONTROLS
     if framework_key == "cis_cisco_ios_v1":
-        return CIS_CISCO_IOS_CONTROLS if vendor == "cisco" else CIS_JUNIPER_CONTROLS
+        if vendor == "cisco":
+            return CIS_CISCO_IOS_CONTROLS
+        if vendor == "juniper":
+            return CIS_JUNIPER_CONTROLS
+        raise UnsupportedFrameworkVendorError(
+            f"{framework_key} is not implemented for vendor {vendor}"
+        )
     return {
         "nist_sp_800_53_rev5": NIST_CONTROLS,
         "disa_stig_network_v1": STIG_CONTROLS,

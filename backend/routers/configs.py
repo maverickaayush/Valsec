@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
+import re
 import zipfile
 from pathlib import Path, PurePosixPath
 from uuid import UUID
@@ -17,6 +19,7 @@ from compliance.catalogues import FRAMEWORKS, get_framework_metadata
 from database import get_db
 from models import ComplianceResult, Config, ConfigStatus, NormalizedFinding, Report
 from reports.compliance_generator import compliance_safe_filename
+from input_validation import validate_device_name
 
 router = APIRouter(prefix="/api/configs", tags=["configs"])
 logger = logging.getLogger(__name__)
@@ -25,7 +28,20 @@ _MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 _MAX_ARCHIVE_BYTES = 10 * 1024 * 1024
 _MAX_ARCHIVE_EXPANDED_BYTES = 25 * 1024 * 1024
 _MAX_ARCHIVE_MEMBERS = 50
-_SUPPORTED_VENDORS = {"cisco": "ios", "juniper": "junos"}
+_KNOWN_VENDORS = {
+    "cisco": "cisco", "juniper": "juniper",
+    "fortinet": "fortinet", "fortigate": "fortinet", "fortios": "fortinet",
+}
+_VENDOR_OS_TYPES = {"cisco": "ios", "juniper": "junos", "fortinet": "fortios"}
+_DEFAULT_GENERIC_FRAMEWORK = "nist_sp_800_53_rev5"
+
+
+def _validated_vendor(value: str) -> str:
+    """Canonicalize known adapters and safely preserve a caller's vendor hint."""
+    vendor = value.strip()
+    if not vendor or len(vendor) > 64 or any(ord(character) < 32 for character in vendor):
+        raise HTTPException(status_code=422, detail="Vendor must be 1-64 printable characters")
+    return _KNOWN_VENDORS.get(vendor.casefold(), vendor)
 
 
 def _is_upload(value: object) -> bool:
@@ -38,10 +54,31 @@ def _is_upload(value: object) -> bool:
 
 
 def _validated_device_name(value: str) -> str:
-    name = value.strip()
-    if not name or len(name) > 255 or any(ord(character) < 32 for character in name):
-        raise HTTPException(status_code=422, detail="Device name must be 1-255 printable characters")
-    return name
+    try:
+        return validate_device_name(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def persist_and_dispatch_configs(db: Session, configs: list[Config]) -> list[str]:
+    """Persist queued configs, then independently dispatch every audit."""
+    for config in configs:
+        db.add(config)
+    db.commit()
+    for config in configs:
+        db.refresh(config)
+    from tasks.audit_orchestrator import run_config_audit
+    dispatch_errors: list[str] = []
+    for config in configs:
+        try:
+            run_config_audit.delay(str(config.id))
+        except Exception:
+            logger.exception("Failed to dispatch config audit %s", config.id)
+            config.status = ConfigStatus.failed
+            dispatch_errors.append(str(config.id))
+    if dispatch_errors:
+        db.commit()
+    return dispatch_errors
 
 
 def _current_user(request: Request, db: Session):
@@ -68,7 +105,7 @@ def _safe_archive_member(member: zipfile.ZipInfo) -> bool:
     return bool(path.name) and not path.is_absolute() and ".." not in path.parts
 
 
-def _extract_upload_entries(upload: UploadFile) -> list[tuple[str, str]]:
+def _extract_upload_entries(upload: UploadFile) -> list[tuple[str, str, str]]:
     filename = upload.filename or "configuration.cfg"
     suffix = Path(filename).suffix.lower()
     maximum = _MAX_ARCHIVE_BYTES if suffix == ".zip" else _MAX_UPLOAD_BYTES
@@ -78,7 +115,7 @@ def _extract_upload_entries(upload: UploadFile) -> list[tuple[str, str]]:
         raise HTTPException(status_code=413, detail=detail)
     if suffix in _TEXT_EXTENSIONS:
         try:
-            return [(data.decode("utf-8"), Path(filename).stem)]
+            return [(data.decode("utf-8"), Path(filename).stem, Path(filename).name)]
         except UnicodeDecodeError as exc:
             raise HTTPException(status_code=422, detail="Configuration must be UTF-8 text") from exc
     if suffix != ".zip":
@@ -103,7 +140,8 @@ def _extract_upload_entries(upload: UploadFile) -> list[tuple[str, str]]:
                 member_data = archive.read(member)
                 if len(member_data) != member.file_size or len(member_data) > _MAX_UPLOAD_BYTES:
                     raise HTTPException(status_code=413, detail="Invalid or oversized ZIP member")
-                entries.append((member_data.decode("utf-8"), PurePosixPath(member.filename.replace("\\", "/")).stem))
+                normalized_name = PurePosixPath(member.filename.replace("\\", "/"))
+                entries.append((member_data.decode("utf-8"), normalized_name.stem, str(normalized_name)))
             return entries
     except zipfile.BadZipFile as exc:
         raise HTTPException(status_code=422, detail="Invalid ZIP archive") from exc
@@ -116,7 +154,78 @@ def _extract_upload(upload: UploadFile) -> tuple[str, str]:
     entries = _extract_upload_entries(upload)
     if len(entries) != 1:
         raise HTTPException(status_code=422, detail="Upload contains multiple configurations")
-    return entries[0]
+    return entries[0][0], entries[0][1]
+
+
+_CISCO_SIGNATURES = (
+    re.compile(r"^\s*version\s+\d", re.IGNORECASE),
+    re.compile(r"^\s*hostname\s+\S+", re.IGNORECASE),
+    re.compile(r"^\s*interface\s+\S+", re.IGNORECASE),
+    re.compile(r"^\s*line\s+(?:con(?:sole)?|vty|aux)\b", re.IGNORECASE),
+    re.compile(r"^\s*(?:no\s+)?service\s+(?:password-encryption|timestamps)\b", re.IGNORECASE),
+    re.compile(r"^\s*(?:ip\s+ssh|enable\s+secret|aaa\s+new-model|crypto\s+key)\b", re.IGNORECASE),
+)
+_JUNIPER_SIGNATURES = (
+    re.compile(r"^\s*(?:set|delete|deactivate|activate)\s+system\s+(?:host-name|domain-name|services|login|root-authentication|syslog|name-server|ntp|time-zone|authentication-order)\b", re.IGNORECASE),
+    re.compile(r"^\s*(?:set|delete|deactivate|activate)\s+(?:interfaces\s+(?:ge-|xe-|et-|fe-|ae\d|lo\d|irb\.|vlan\.)|security\b|protocols\b|routing-options\b|policy-options\b)", re.IGNORECASE),
+    re.compile(r"^\s*(?:system|interfaces|security|protocols|routing-options|policy-options)\s*\{", re.IGNORECASE),
+    re.compile(r"^\s*##\s*(?:last commit|juniper)", re.IGNORECASE),
+)
+_FORTIOS_SIGNATURES = (
+    re.compile(r"^\s*#config-version=(?:FGT|FortiGate|FortiOS)", re.IGNORECASE),
+    re.compile(r"^\s*config\s+(?:system\s+(?:global|interface|admin|ntp|snmp)|firewall\s+(?:policy|address)|log\s+(?:disk|fortianalyzer|syslogd)\s+setting)\b", re.IGNORECASE),
+)
+_FORTIOS_WEAK_SIGNATURES = (
+    re.compile(r"^\s*set\s+(?:admintimeout|admin-ssh-v1|strong-crypto|allowaccess|logtraffic)\b", re.IGNORECASE),
+)
+
+
+def detect_config_vendor(raw_config: str) -> str | None:
+    """Identify only the hand-written formats we actually parse; unknown stays unknown."""
+    lines = raw_config.splitlines()[:2000]
+    fortios_strong_hits = sum(any(pattern.search(line) for pattern in _FORTIOS_SIGNATURES) for line in lines)
+    fortios_weak_hits = sum(any(pattern.search(line) for pattern in _FORTIOS_WEAK_SIGNATURES) for line in lines)
+    fortios_hits = fortios_strong_hits * 3 + fortios_weak_hits
+    juniper_hits = sum(any(pattern.search(line) for pattern in _JUNIPER_SIGNATURES) for line in lines)
+    cisco_hits = sum(any(pattern.search(line) for pattern in _CISCO_SIGNATURES) for line in lines)
+    if (fortios_strong_hits or fortios_weak_hits >= 2) and fortios_hits >= max(juniper_hits, cisco_hits):
+        return "fortinet"
+    if juniper_hits and juniper_hits >= cisco_hits:
+        return "juniper"
+    if cisco_hits:
+        return "cisco"
+    return None
+
+
+def _default_framework(vendor: str) -> str:
+    return "cis_cisco_ios_v1" if vendor in {"cisco", "juniper"} else _DEFAULT_GENERIC_FRAMEWORK
+
+
+def _parse_vendor_hints(value: str | None) -> dict[str, str]:
+    # Direct-call unit tests pass FastAPI's Form sentinel when the optional field
+    # is omitted; real requests always resolve it to str | None.
+    if not isinstance(value, str) or not value:
+        return {}
+    if len(value) > 16_384:
+        raise HTTPException(status_code=422, detail="Per-file vendor hints exceed the allowed size")
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=422, detail="Per-file vendor hints must be a JSON object") from exc
+    if (
+        not isinstance(parsed, dict)
+        or len(parsed) > _MAX_ARCHIVE_MEMBERS
+        or any(
+            not isinstance(key, str)
+            or not key.strip()
+            or len(key) > 512
+            or any(ord(character) < 32 for character in key)
+            or not isinstance(item, str)
+            for key, item in parsed.items()
+        )
+    ):
+        raise HTTPException(status_code=422, detail="Per-file vendor hints must be a JSON object")
+    return {key: _validated_vendor(item) for key, item in parsed.items()}
 
 
 def _progress(config: Config) -> int:
@@ -137,16 +246,18 @@ def upload_config(
     file: UploadFile | None = File(default=None),
     raw_config: str | None = Form(default=None),
     vendor: str = Form(default="cisco"),
-    framework: str = Form(default="cis_cisco_ios_v1"),
+    framework: str | None = Form(default=None),
     device_name: str | None = Form(default=None),
     db: Session = Depends(get_db),
     files: list[UploadFile] | None = File(default=None),
+    vendor_hints: str | None = Form(default=None),
 ):
-    vendor = vendor.lower()
-    if vendor not in _SUPPORTED_VENDORS:
-        raise HTTPException(status_code=422, detail="Supported vendors are Cisco IOS/IOS-XE and Juniper JunOS")
-    if framework not in FRAMEWORKS:
+    vendor = _validated_vendor(vendor)
+    if not isinstance(framework, str):
+        framework = None
+    if framework is not None and framework not in FRAMEWORKS:
         raise HTTPException(status_code=422, detail="Unsupported compliance framework")
+    per_file_vendors = _parse_vendor_hints(vendor_hints)
     extra_uploads = [upload for upload in files if _is_upload(upload)] if isinstance(files, list) else []
     uploads = ([file] if _is_upload(file) else []) + extra_uploads
     raw_text = raw_config if isinstance(raw_config, str) and raw_config else None
@@ -160,7 +271,7 @@ def upload_config(
         expanded_bytes = 0
         for upload in uploads:
             upload_entries = _extract_upload_entries(upload)
-            expanded_bytes += sum(len(text.encode("utf-8")) for text, _ in upload_entries)
+            expanded_bytes += sum(len(text.encode("utf-8")) for text, _, _ in upload_entries)
             if expanded_bytes > _MAX_ARCHIVE_EXPANDED_BYTES:
                 raise HTTPException(status_code=413, detail="Request configuration content exceeds 25 MiB")
             entries.extend(upload_entries)
@@ -169,44 +280,62 @@ def upload_config(
     else:
         if len(raw_text.encode("utf-8")) > _MAX_UPLOAD_BYTES:
             raise HTTPException(status_code=413, detail="Configuration text exceeds 5 MiB")
-        entries = [(raw_text, "unnamed-device")]
+        entries = [(raw_text, "unnamed-device", "unnamed-device")]
     if len(entries) > _MAX_ARCHIVE_MEMBERS:
         raise HTTPException(status_code=413, detail="Request contains more than 50 configurations")
-    if sum(len(text.encode("utf-8")) for text, _ in entries) > _MAX_ARCHIVE_EXPANDED_BYTES:
+    if sum(len(text.encode("utf-8")) for text, _, _ in entries) > _MAX_ARCHIVE_EXPANDED_BYTES:
         raise HTTPException(status_code=413, detail="Request configuration content exceeds 25 MiB")
+    if len(entries) == 1:
+        single_vendor = detect_config_vendor(entries[0][0]) or (
+            per_file_vendors.get(entries[0][2])
+            or per_file_vendors.get(Path(entries[0][2]).name)
+            or vendor
+        )
+        if framework == "cis_cisco_ios_v1" and single_vendor not in {"cisco", "juniper"}:
+            raise HTTPException(
+                status_code=422,
+                detail="The CIS catalogue is vendor-specific; choose a vendor-neutral framework for an unrecognized vendor",
+            )
+        if single_vendor == "fortinet" and framework not in {None, "nist_sp_800_53_rev5"}:
+            raise HTTPException(
+                status_code=422,
+                detail="Fortinet FortiOS currently supports nist_sp_800_53_rev5",
+            )
     user = _current_user(http_request, db)
     configs = []
-    for text, derived_name in entries:
+    for text, derived_name, source_name in entries:
+        detected_vendor = detect_config_vendor(text)
+        hinted_vendor = per_file_vendors.get(source_name) or per_file_vendors.get(Path(source_name).name)
+        selected_vendor = detected_vendor or hinted_vendor or vendor
+        selected_framework = framework
+        if selected_framework is None:
+            selected_framework = _default_framework(selected_vendor)
+        elif selected_vendor == "fortinet" and selected_framework != "nist_sp_800_53_rev5":
+            selected_framework = _DEFAULT_GENERIC_FRAMEWORK
+        elif selected_framework == "cis_cisco_ios_v1" and selected_vendor not in {"cisco", "juniper"}:
+            # Keep a mixed known/unknown fleet moving: CIS applies to its supported
+            # adapters; an unrecognized syntax file gets a deterministic neutral catalogue.
+            selected_framework = _DEFAULT_GENERIC_FRAMEWORK
         name = _validated_device_name(
             (requested_name if len(entries) == 1 else None) or derived_name
         )
         config = Config(
             device_name=name,
-            vendor=vendor,
-            os_type=_SUPPORTED_VENDORS[vendor],
+            vendor=selected_vendor,
+            os_type=_VENDOR_OS_TYPES.get(selected_vendor, "unknown"),
             raw_config=text,
-            selected_framework=framework,
+            selected_framework=selected_framework,
             status=ConfigStatus.queued,
             user_id=user.id if user else None,
         )
-        db.add(config)
         configs.append(config)
-    db.commit()
-    for config in configs:
-        db.refresh(config)
-    from tasks.audit_orchestrator import run_config_audit
-    dispatch_errors = []
-    for config in configs:
-        try:
-            run_config_audit.delay(str(config.id))
-        except Exception:
-            logger.exception("Failed to dispatch config audit %s", config.id)
-            config.status = ConfigStatus.failed
-            dispatch_errors.append(str(config.id))
-    if dispatch_errors:
-        db.commit()
+    dispatch_errors = persist_and_dispatch_configs(db, configs)
     responses = [
-        {"config_id": config.id, "status": config.status.value, "device_name": config.device_name}
+        {
+            "config_id": config.id, "status": config.status.value,
+            "device_name": config.device_name, "vendor": config.vendor,
+            "os_type": config.os_type, "selected_framework": config.selected_framework,
+        }
         for config in configs
     ]
     if len(responses) == 1:
@@ -253,7 +382,7 @@ def config_status(config_id: UUID, http_request: Request, db: Session = Depends(
     config = get_owned_config_or_404(config_id, http_request, db)
     unverified_count = db.query(NormalizedFinding).filter(
         NormalizedFinding.config_id == config.id,
-        NormalizedFinding.confidence == "unverified",
+        NormalizedFinding.confidence.in_(["probable", "unverified"]),
     ).count()
     return {"config_id": config.id, "status": config.status.value,
             "vendor": config.vendor, "os_type": config.os_type,
@@ -278,10 +407,17 @@ def config_results(config_id: UUID, http_request: Request, db: Session = Depends
             "compliance_score": config.compliance_score,
             "total_passed": config.total_passed, "total_failed": config.total_failed, "total_na": config.total_na,
             "severity_counts": severity_counts, "results": [{
-                "control_id": result.control_id, "framework": result.framework, "title": result.title,
+                "id": getattr(result, "id", None), "control_id": result.control_id, "framework": result.framework, "title": result.title,
                 "description": result.description, "verdict": result.verdict.value, "severity": result.severity.value,
                 "observed_value": result.observed_value, "remediation_cli": result.remediation_cli,
                 "is_remediation_fallback": result.is_remediation_fallback,
+                "remediation_action": ({
+                    "id": result.remediation_action.id,
+                    "status": result.remediation_action.status.value,
+                    "risky": result.remediation_action.risky,
+                    "diff_summary": result.remediation_action.diff_summary,
+                    "failure_message": result.remediation_action.failure_message,
+                } if getattr(result, "remediation_action", None) is not None else None),
             } for result in results]}
 
 

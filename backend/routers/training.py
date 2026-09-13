@@ -32,8 +32,8 @@ def get_unverified_findings(
 ) -> dict[str, Any]:
     """Retrieve unverified findings (unknown lines) for a configuration.
 
-    Returns a list of findings with confidence='unverified', allowing the operator
-    to review and classify them. The audit remains paused at awaiting_training state.
+    Returns findings that still require operator review. A valid AI proposal is
+    ``probable``; a line without one is ``unverified``. Both keep the audit paused.
 
     Args:
         config_id: UUID of the config
@@ -59,7 +59,7 @@ def get_unverified_findings(
         db.query(NormalizedFinding)
         .filter(
             NormalizedFinding.config_id == config_uuid,
-            NormalizedFinding.confidence == "unverified",
+            NormalizedFinding.confidence.in_(["probable", "unverified"]),
         )
         .all()
     )
@@ -175,7 +175,8 @@ def submit_training(
                 detail="Finding was already confirmed with a different mapping",
             )
         if not already_confirmed and str(finding.confidence) not in {
-            "unverified", "ConfidenceTier.unverified"
+            "probable", "ConfidenceTier.probable",
+            "unverified", "ConfidenceTier.unverified",
         }:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -258,7 +259,7 @@ def submit_training(
             db.query(NormalizedFinding)
             .filter(
                 NormalizedFinding.config_id == config_uuid,
-                NormalizedFinding.confidence == "unverified",
+                NormalizedFinding.confidence.in_(["probable", "unverified"]),
             )
             .count()
         )
@@ -350,6 +351,7 @@ def _unverified_item(finding: NormalizedFinding) -> dict[str, Any]:
         "raw_source_line": finding.raw_source_line,
         "line_number": finding.line_number,
         "schema_field": finding.schema_field,
+        "confidence": finding.confidence.value if hasattr(finding.confidence, "value") else str(finding.confidence),
         "ai_suggested_field": suggested_field,
         "ai_suggested_schema_field": suggested_field,
         "ai_confidence": ai_confidence,

@@ -1,10 +1,9 @@
 import type { Metadata, Viewport } from 'next'
-import { AuthGate } from '@/components/auth-gate'
 import './globals.css'
 
 export const metadata: Metadata = {
   title: 'Valsec · AI-Driven Network Compliance Auditor',
-  description: 'Air-gapped Cisco IOS configuration compliance with deterministic CIS verdicts.',
+  description: 'Air-gapped Cisco, Juniper, and Fortinet network compliance with deterministic verdicts.',
 }
 
 export const viewport: Viewport = {
@@ -24,7 +23,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       className="dark"
     >
       <body className="antialiased">
-        <AuthGate>{children}</AuthGate>
+        {children}
       </body>
     </html>
   )

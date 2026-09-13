@@ -10,16 +10,6 @@ from database import Base
 import enum
 
 
-class ScanStatus(str, enum.Enum):
-    queued = "queued"
-    running = "running"
-    analysing = "analysing"
-    awaiting_user_decision = "awaiting_user_decision"
-    complete = "complete"
-    failed = "failed"
-    cancelled = "cancelled"
-
-
 class ConfigStatus(str, enum.Enum):
     queued = "queued"
     normalising = "normalising"
@@ -48,6 +38,31 @@ class ComplianceSeverity(str, enum.Enum):
     Medium = "Medium"
     Low = "Low"
     Informational = "Informational"
+
+
+class RemediationActionStatus(str, enum.Enum):
+    proposed = "proposed"
+    approved = "approved"
+    applying = "applying"
+    applied = "applied"
+    failed = "failed"
+
+
+class DiscoverySessionStatus(str, enum.Enum):
+    running = "running"
+    awaiting_input = "awaiting_input"
+    complete = "complete"
+    partial = "partial"
+    failed = "failed"
+
+
+class DiscoveredDeviceStatus(str, enum.Enum):
+    discovered = "discovered"
+    needs_input = "needs_input"
+    pulling = "pulling"
+    audit_queued = "audit_queued"
+    failed = "failed"
+    skipped = "skipped"
 
 
 class User(Base):
@@ -97,44 +112,6 @@ class AuthProvider(Base):
     )
 
 
-class Scan(Base):
-    __tablename__ = "scans"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    domain = Column(String(255), nullable=False)
-    status = Column(SAEnum(ScanStatus), nullable=False, default=ScanStatus.queued)
-    authorized = Column(Boolean, nullable=False, default=False)
-    # 'quick' (passive-only profile) | 'full' (all 8 active modules). Default
-    # 'full' preserves prior behavior for local/self-hosted callers that don't
-    # send a mode.
-    scan_type = Column(String(8), nullable=False, default='full')
-    # Owner in hosted (REQUIRE_AUTH) mode; NULL for local/self-hosted scans.
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
-    started_at = Column(DateTime, nullable=True)
-    completed_at = Column(DateTime, nullable=True)
-    # Set the moment a scan is handed to Celery (immediately at acceptance, or
-    # later by tasks/queue_scheduler.py when a slot frees). Distinguishes a scan
-    # WAITING for capacity (status='queued' AND dispatched_at IS NULL) from one
-    # already dispatched and occupying a slot. Only written/read when
-    # config.HOSTED_QUEUE_ENABLED is True; stays NULL (and unused) otherwise, so
-    # this column is inert for self-hosted deployments.
-    dispatched_at = Column(DateTime, nullable=True)
-    module_statuses = Column(JSONB, nullable=True, default=dict)
-    raw_findings = Column(JSONB, nullable=True)
-    ai_analysis = Column(JSONB, nullable=True)
-    risk_score = Column(Integer, nullable=True)
-    notes = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    # Bumped on every ORM-level write (status transitions, risk_score, etc.)
-    # via onupdate - not bumped by base_task.py's raw-SQL module_statuses
-    # update (that's deliberately a separate, high-frequency, per-module
-    # signal; this column is "when did the scan's own record last change,"
-    # for the /api/scans listing page's "Last updated" column).
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=True)
-
-    report = relationship("Report", back_populates="scan", uselist=False)
-
-
 class Config(Base):
     """Uploaded device configuration and its audit lifecycle state.
 
@@ -163,7 +140,55 @@ class Config(Base):
 
     findings = relationship("NormalizedFinding", back_populates="config", cascade="all, delete-orphan")
     compliance_results = relationship("ComplianceResult", back_populates="config", cascade="all, delete-orphan")
-    report = relationship("Report", back_populates="config", uselist=False)
+    report = relationship("Report", back_populates="config", uselist=False, cascade="all, delete-orphan")
+    discovery_device = relationship("DiscoveredDevice", back_populates="config", uselist=False)
+
+
+class DiscoverySession(Base):
+    """One authenticated seed traversal; request credentials are never persisted."""
+    __tablename__ = "discovery_sessions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    seed_host = Column(String(253), nullable=False)
+    seed_vendor = Column(String(64), nullable=False, default="auto")
+    status = Column(SAEnum(DiscoverySessionStatus), nullable=False, default=DiscoverySessionStatus.running)
+    max_depth = Column(Integer, nullable=False, default=1)
+    max_devices = Column(Integer, nullable=False, default=25)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=True)
+
+    devices = relationship("DiscoveredDevice", back_populates="session", cascade="all, delete-orphan")
+
+
+class DiscoveredDevice(Base):
+    """Persistent evidence and processing state for one deduplicated address."""
+    __tablename__ = "discovered_devices"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id = Column(UUID(as_uuid=True), ForeignKey("discovery_sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    address = Column(String(64), nullable=False)
+    parent_address = Column(String(64), nullable=False)
+    mac_address = Column(String(32), nullable=True)
+    interface = Column(String(128), nullable=True)
+    vendor_hint = Column(String(64), nullable=True)
+    platform_hint = Column(String(255), nullable=True)
+    discovery_sources = Column(JSONB, nullable=False, default=list)
+    raw_evidence = Column(JSONB, nullable=False, default=dict)
+    depth = Column(Integer, nullable=False, default=1)
+    status = Column(SAEnum(DiscoveredDeviceStatus), nullable=False, default=DiscoveredDeviceStatus.discovered)
+    error_message = Column(Text, nullable=True)
+    config_id = Column(UUID(as_uuid=True), ForeignKey("configs.id", ondelete="SET NULL"), nullable=True, unique=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=True)
+
+    session = relationship("DiscoverySession", back_populates="devices")
+    config = relationship("Config", back_populates="discovery_device")
+
+    __table_args__ = (
+        UniqueConstraint("session_id", "address", name="uq_discovered_device_session_address"),
+    )
 
 
 class NormalizedFinding(Base):
@@ -248,48 +273,47 @@ class ComplianceResult(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     config = relationship("Config", back_populates="compliance_results")
+    remediation_action = relationship(
+        "RemediationAction", back_populates="finding", uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+
+class RemediationAction(Base):
+    """Immutable operator-approved CLI plus evidence from an apply attempt."""
+    __tablename__ = "remediation_actions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    finding_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("compliance_results.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    status = Column(
+        SAEnum(RemediationActionStatus), nullable=False,
+        default=RemediationActionStatus.proposed,
+    )
+    remediation_text = Column(Text, nullable=False)
+    risky = Column(Boolean, nullable=False, default=False)
+    pre_change_snapshot = Column(Text, nullable=True)
+    post_change_snapshot = Column(Text, nullable=True)
+    diff_summary = Column(Text, nullable=True)
+    failure_message = Column(Text, nullable=True)
+    applied_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=True)
+
+    finding = relationship("ComplianceResult", back_populates="remediation_action")
 
 
 class Report(Base):
     __tablename__ = "reports"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.id"), nullable=True)
-    config_id = Column(UUID(as_uuid=True), ForeignKey("configs.id", ondelete="CASCADE"), nullable=True, index=True)
+    config_id = Column(UUID(as_uuid=True), ForeignKey("configs.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
     pdf_data = Column(LargeBinary, nullable=False)
     generated_at = Column(DateTime, default=datetime.utcnow)
 
-    scan = relationship("Scan", back_populates="report")
     config = relationship("Config", back_populates="report")
-
-
-class DomainVerification(Base):
-    """Domain-ownership (Domain Control Validation) record - routers/verify.py.
-
-    Two-step, claim-key model (deployment-scoped, no user accounts):
-      1. issue  -> a `pending` row with a random `token` the owner must place
-                   (meta tag on the homepage, or a file under /.well-known/).
-      2. check  -> if the token is found, status flips to `verified`, a secret
-                   claim key is minted and only its SHA-256 hash is stored here
-                   (`key_hash`). The plaintext key is returned to the caller
-                   exactly once and never persisted.
-
-    A scan for this domain is then gated on presenting that claim key (its hash
-    must match a non-expired verified row). This closes the "A verifies, B rides
-    it" bypass a domain-only cache would have, without needing login/accounts.
-    Only enforced when config.REQUIRE_DOMAIN_VERIFICATION is True.
-    """
-    __tablename__ = "domain_verifications"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    # Owner in hosted (REQUIRE_AUTH) mode; NULL for the account-less claim-key
-    # flow (REQUIRE_DOMAIN_VERIFICATION) so that path keeps working unchanged.
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
-    domain = Column(String(255), nullable=False, index=True)
-    method = Column(String(16), nullable=False)          # 'meta_tag' | 'http_file'
-    token = Column(String(96), nullable=False)           # challenge value to place
-    key_hash = Column(String(64), nullable=True)         # sha256(claim_key), set on verify
-    status = Column(String(16), nullable=False, default="pending")  # 'pending' | 'verified'
-    created_at = Column(DateTime, default=datetime.utcnow)
-    verified_at = Column(DateTime, nullable=True)
-    expires_at = Column(DateTime, nullable=True)         # verified_at + TTL

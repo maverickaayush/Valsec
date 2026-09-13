@@ -1,8 +1,9 @@
-"""Hosted-tier authentication (only mounted logic-wise when REQUIRE_AUTH is on;
-the routes always exist but a local deployment simply never calls them).
+"""Optional authentication for multi-user Valsec deployments.
 
-Flow: signup -> email OTP verify (establishes session) -> domain ownership
-(routers/verify.py) -> scan. Sessions are opaque Redis-backed HttpOnly cookies
+The routes remain available in local mode, but the Valsec audit APIs only require
+a session when REQUIRE_AUTH is enabled.
+
+Flow: signup -> email OTP verify -> audit. Sessions are opaque Redis-backed HttpOnly cookies
 (security.py). All error text is generic — no stack traces, no internals.
 """
 import logging
@@ -25,7 +26,6 @@ from schemas import (
 )
 import security
 import oauth
-from routers.verify import user_has_verified_domain
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -61,21 +61,14 @@ def _clear_session_cookie(response: Response) -> None:
 
 
 def _auth_state(user: User, db: Session) -> AuthUserResponse:
-    # Product decision: domain ownership is NOT part of onboarding. A verified
-    # user goes straight to the dashboard regardless of whether they own any
-    # verified domain - target authorization happens later, only when they
-    # request a FULL VAPT scan. So next_step is only 'verify_email' or 'ready';
-    # has_verified_domain is informational (dashboard display), never routing.
-    has_domain = user_has_verified_domain(db, user.id)
     step = "ready" if user.email_verified else "verify_email"
     from datetime import datetime
-    from models import Scan
+    from models import Config
     month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    used = db.query(Scan).filter(Scan.user_id == user.id, Scan.created_at >= month_start).count()
+    used = db.query(Config).filter(Config.user_id == user.id, Config.uploaded_at >= month_start).count()
     return AuthUserResponse(
         id=user.id, email=user.email, email_verified=user.email_verified,
-        has_verified_domain=has_domain, next_step=step,
-        scans_this_month=used, scan_limit=settings.MAX_SCANS_PER_MONTH,
+        next_step=step, audits_this_month=used, audit_limit=settings.MAX_AUDITS_PER_MONTH,
     )
 
 
@@ -208,7 +201,7 @@ def auth_providers():
     `require_auth` is the frontend's only reliable hosted/self-hosted signal:
     google/github being false is ambiguous, since a hosted instance with no
     OAuth app configured reports exactly the same thing. The frontend uses it to
-    decide whether to guard routes and whether to offer the scan-mode toggle."""
+    decide whether to guard routes."""
     if not settings.REQUIRE_AUTH:
         return {"password": True, "google": False, "github": False, "require_auth": False}
     return {"password": True, **oauth.enabled_providers(), "require_auth": True}
@@ -248,9 +241,6 @@ def oauth_callback(provider: str, request: Request, db: Session = Depends(get_db
         return RedirectResponse(f"{front}/sign-in?error=oauth", status_code=303)
 
     token = security.create_session(user.id)
-    # '/' used to be the scan form; it is now the public marketing landing, so
-    # sending OAuth users there dropped them on marketing instead of the app.
-    # Matches the password path, which resolves to /scan/new via nextTarget().
-    redirect = RedirectResponse(f"{front}/scan/new", status_code=303)
+    redirect = RedirectResponse(f"{front}/", status_code=303)
     _set_session_cookie(redirect, token)
     return redirect

@@ -17,6 +17,7 @@ from uuid import uuid4
 import pytest
 
 from normalizer.cisco_ios import CiscoIOSNormalizer
+from normalizer.generic import GenericFallbackNormalizer
 from normalizer.schema import Confidence, MappingSource
 from training.matcher import DatabaseLearnedMappingResolver, _generate_pattern_signature
 
@@ -271,6 +272,57 @@ class TestDatabaseResolverProtocol:
 
         assert resolver.resolve(vendor="cisco", raw_line="", line_number=1, context=None) is None
         assert resolver.resolve(vendor="cisco", raw_line="   ", line_number=1, context=None) is None
+
+
+def test_unknown_vendor_learned_mapping_reuse_is_vendor_scoped():
+    vendor = "Acme EdgeOS"
+    raw_line = "set system ssh generation 2"
+    mapping = MagicMock(
+        vendor=vendor,
+        user_id=None,
+        pattern_signature=_generate_pattern_signature(raw_line),
+        schema_field="ssh.version",
+        examples=[{"raw_line": raw_line, "field_value": 2}],
+    )
+
+    class ScopedQuery:
+        def __init__(self):
+            self.matches = True
+        def filter(self, *criteria):
+            for criterion in criteria:
+                key = getattr(getattr(criterion, "left", None), "key", None)
+                expected = getattr(getattr(criterion, "right", None), "value", None)
+                if key in {"vendor", "user_id", "pattern_signature"}:
+                    self.matches = self.matches and getattr(mapping, key) == expected
+            return self
+        def first(self):
+            return mapping if self.matches else None
+
+    db = MagicMock()
+    db.query.side_effect = lambda *_: ScopedQuery()
+
+    same_vendor = GenericFallbackNormalizer(vendor, DatabaseLearnedMappingResolver(db)).parse(raw_line)
+    different_vendor = GenericFallbackNormalizer(
+        "Another EdgeOS", DatabaseLearnedMappingResolver(db)
+    ).parse(raw_line)
+
+    assert same_vendor.unknown_lines == []
+    assert same_vendor.findings[0].schema_field == "ssh.version"
+    assert same_vendor.findings[0].field_value == 2
+    assert same_vendor.findings[0].confidence == Confidence.CONFIRMED
+    assert same_vendor.findings[0].mapping_source == MappingSource.LEARNED_MAPPING
+    assert len(different_vendor.unknown_lines) == 1
+    assert different_vendor.unknown_lines[0].raw_source_line == raw_line
+
+
+def test_generic_fallback_preserves_unknown_line_text_and_source_location():
+    raw = "\n  set system magic-feature enabled  \n\n# format is vendor-specific\n"
+    result = GenericFallbackNormalizer("Acme EdgeOS").parse(raw)
+    assert [(item.raw_source_line, item.line_number) for item in result.unknown_lines] == [
+        ("  set system magic-feature enabled  ", 2),
+        ("# format is vendor-specific", 4),
+    ]
+    assert result.findings == []
 
 
 if __name__ == "__main__":

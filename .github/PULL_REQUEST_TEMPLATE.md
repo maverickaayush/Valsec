@@ -1,16 +1,19 @@
 ## What changed and why
 
 
+## Impacted areas
 
-## Impacted area(s)
+- [ ] Normalization
+- [ ] Compliance/remediation
+- [ ] Training/audit lifecycle
+- [ ] Data/reporting/API
+- [ ] AI/deployment
+- [ ] Frontend/delivery
 
-<!-- Helps a solo maintainer triage fast. Delete what doesn't apply. -->
-Scanning module(s): <!-- recon / webscan / ssl_tls / headers / owasp / tech_fingerprint / nuclei / enumeration / none -->
-Other: <!-- aggregator / cvss_scorer / verifier / ollama_client / reports / api / frontend / docs / ci -->
+## Validation
 
-## Checklist
-
-- [ ] `pytest backend/tests` passes locally
-- [ ] Finding schema / safety guardrails (see `CONTRIBUTING.md`) are intact
-- [ ] No new external API calls or dependencies added without discussion
-- [ ] Docs/comments updated if behavior or config changed
+- [ ] Focused Valsec tests pass
+- [ ] Backend compiles/imports
+- [ ] Frontend typecheck and production build pass
+- [ ] Security and deterministic-verdict boundaries remain intact
+- [ ] Documentation reflects actual behavior
