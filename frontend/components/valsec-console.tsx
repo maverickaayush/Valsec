@@ -10,11 +10,13 @@ import {
   Terminal, Trash2, Upload, X, Zap,
 } from 'lucide-react'
 import {
+  applyRemediation, approveRemediation,
   configReportUrl, getConfigResults, getConfigs, getConfigStatus, getUnverified,
+  getDiscoverySession, processDiscoveryDevice, pullDevice, skipDiscoveryDevice, startDiscoverySession,
   trainFinding, uploadConfig, type ComplianceResult, type ConfigListItem,
   type ConfigVendor, type FrameworkKey,
   type ConfigResultsResponse, type ConfigStatus, type ConfigStatusResponse,
-  type UnverifiedLine,
+  type DiscoverySessionResponse, type UnverifiedLine,
 } from '@/lib/valsec-api'
 
 export type ValsecView = 'overview' | 'upload' | 'audits' | 'status' | 'training' | 'report' | 'frameworks'
@@ -25,13 +27,14 @@ const SCHEMA_FIELDS = [
   'service_hardening.finger_disabled', 'service_hardening.tcp_small_servers_disabled',
   'service_hardening.udp_small_servers_disabled', 'service_hardening.bootp_server_disabled',
   'service_hardening.http_server_disabled', 'service_hardening.http_secure_server_enabled',
+  'service_hardening.strong_crypto_enabled',
   'access_control.banner_motd', 'access_control.banner_login', 'access_control.source_route_disabled',
   'line_console.exec_timeout_minutes', 'line_console.transport_preferred',
   'line_vty.transport_input', 'line_vty.exec_timeout_minutes', 'line_vty.access_class',
   'ssh.version', 'ssh.timeout_seconds', 'ssh.auth_retries', 'aaa.new_model',
   'aaa.authentication_login', 'logging.buffered_size', 'logging.trap_severity',
-  'logging.timestamps_enabled', 'snmp.v3_only', 'snmp.default_communities_removed',
-  'ntp.servers', 'ntp.authenticate', 'cdp.global_disabled',
+  'logging.enabled', 'logging.timestamps_enabled', 'snmp.v3_only', 'snmp.default_communities_removed',
+  'ntp.enabled', 'ntp.servers', 'ntp.authenticate', 'cdp.global_disabled',
 ] as const
 
 const STATUS_LABEL: Record<ConfigStatus, string> = {
@@ -39,8 +42,94 @@ const STATUS_LABEL: Record<ConfigStatus, string> = {
   compliance_check: 'COMPLIANCE CHECK', complete: 'COMPLETE', failed: 'FAILED', cancelled: 'CANCELLED',
 }
 
+function PullDeviceCard({ navigate, refreshFleet }: { navigate: (view: ValsecView, id?: string) => void; refreshFleet: () => void }) {
+  const [host, setHost] = useState('')
+  const [port, setPort] = useState('22')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [vendor, setVendor] = useState('cisco')
+  const [customVendor, setCustomVendor] = useState('')
+  const [framework, setFramework] = useState<FrameworkKey>('cis_cisco_ios_v1')
+  const [deviceName, setDeviceName] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const vendorValue = vendor === '__other__' ? customVendor.trim() : vendor
+  const submit = async () => {
+    if (!host.trim() || !username.trim() || !password || !deviceName.trim() || !vendorValue) {
+      setError('Host, username, password, vendor, and device name are required.')
+      return
+    }
+    setSubmitting(true); setError(null)
+    try {
+      const response = await pullDevice({
+        host: host.trim(), port: Number(port), username: username.trim(), password,
+        vendor: vendorValue, framework, device_name: deviceName.trim(),
+      })
+      setPassword('')
+      refreshFleet()
+      navigate('status', response.configs[0].config_id)
+    } catch (cause) { setError(errorMessage(cause)) } finally { setPassword(''); setSubmitting(false) }
+  }
+  return <Card className="pull-device-card"><SectionTitle eyebrow="LOCAL DEVICE / SSH" title="Pull Configuration" description="Retrieve one configuration over SSH and send it through the existing audit pipeline. Credentials remain in this request only." /><div className="connection-grid"><label>Host or IP<input value={host} placeholder="192.168.1.1" onChange={event => setHost(event.target.value)} /></label><label>SSH port<input type="number" min={1} max={65535} value={port} onChange={event => setPort(event.target.value)} /></label><label>Username<input autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} /></label><label>Password<input type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} /></label><label>Device name<input value={deviceName} placeholder="branch-router" onChange={event => setDeviceName(event.target.value)} /></label><label>Device command profile<select value={vendor} onChange={event => { const value = event.target.value; setVendor(value); if (value !== 'cisco') setFramework('nist_sp_800_53_rev5') }}><option value="cisco">Cisco IOS / IOS-XE</option><option value="juniper">Juniper JunOS</option><option value="OpenWrt">Generic UCI / OpenWrt</option><option value="__other__">Other UCI vendor</option></select></label>{vendor === '__other__' && <label>Vendor identifier<input maxLength={64} value={customVendor} placeholder="Vendor name for mapping scope" onChange={event => setCustomVendor(event.target.value)} /></label>}<label>Framework<select value={framework} onChange={event => setFramework(event.target.value as FrameworkKey)}>{Object.entries(FRAMEWORK_LABELS).map(([key, label]) => <option key={key} value={key} disabled={vendor !== 'cisco' && key === 'cis_cisco_ios_v1'}>{label}</option>)}</select></label></div>{error && <ErrorState message={error} />}<div className="pull-actions"><div className="privacy-note"><LockKeyhole /> Passwords are never stored. Pull runs one fixed read-only command.</div><button className="button primary" disabled={submitting} onClick={submit}>{submitting ? <><RefreshCw className="spin" /> Connecting</> : <><Network /> Pull &amp; Audit</>}</button></div></Card>
+}
+
+function DiscoverNeighborCard({ navigate, refreshFleet }: { navigate: (view: ValsecView, id?: string) => void; refreshFleet: () => void }) {
+  const [seedHost, setSeedHost] = useState('192.168.1.2')
+  const [seedUsername, setSeedUsername] = useState('root')
+  const [seedPassword, setSeedPassword] = useState('')
+  const [session, setSession] = useState<DiscoverySessionResponse | null>(null)
+  const [neighborUsername, setNeighborUsername] = useState('admin')
+  const [neighborPassword, setNeighborPassword] = useState('')
+  const [transport, setTransport] = useState<'ssh' | 'telnet'>('telnet')
+  const [vendor, setVendor] = useState('Cirotech')
+  const [deviceName, setDeviceName] = useState('cirotech-neighbor')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const seed = { host: seedHost.trim(), port: 22, username: seedUsername.trim(), password: seedPassword, vendor: 'OpenWrt' }
+  const discover = async () => {
+    if (!seed.host || !seed.username || !seed.password) { setError('Seed host, username, and password are required.'); return }
+    setBusy(true); setError(null)
+    try {
+      const response = await startDiscoverySession({ seed, framework: 'nist_sp_800_53_rev5', max_depth: 2, max_devices: 25, reuse_seed_credentials: true })
+      setSession(response)
+      setSeedPassword('')
+      if (!response.devices.length) setError('The authenticated seed reported no usable management neighbors.')
+      refreshFleet()
+    } catch (cause) { setError(errorMessage(cause)) } finally { setBusy(false) }
+  }
+  const audit = async (deviceId: string) => {
+    if (!session || !neighborUsername.trim() || !neighborPassword || !deviceName.trim()) { setError('Provide the discovered device credentials and device name.'); return }
+    setBusy(true); setError(null)
+    try {
+      const response = await processDiscoveryDevice(session.session_id, deviceId, {
+        port: transport === 'telnet' ? 23 : 22,
+        username: neighborUsername.trim(), password: neighborPassword,
+        transport, vendor, framework: 'nist_sp_800_53_rev5', device_name: deviceName.trim(),
+      })
+      setNeighborPassword(''); refreshFleet()
+      setSession(await getDiscoverySession(session.session_id))
+      if (response.config_id) navigate('status', response.config_id)
+    } catch (cause) { setError(errorMessage(cause)) } finally { setNeighborPassword(''); setBusy(false) }
+  }
+  const skip = async (deviceId: string) => {
+    if (!session) return
+    setBusy(true); setError(null)
+    try {
+      await skipDiscoveryDevice(session.session_id, deviceId)
+      setSession(await getDiscoverySession(session.session_id))
+    } catch (cause) { setError(errorMessage(cause)) } finally { setBusy(false) }
+  }
+  return <Card className="pull-device-card"><SectionTitle eyebrow="SEED / NEIGHBOR DISCOVERY" title="Discover & Audit Neighbors" description="Authenticate once to the seed. Valsec discovers, validates, and automatically processes neighbors when their profile and credentials are safely available." />
+    <div className="connection-grid"><label>Seed address<input value={seedHost} onChange={event => setSeedHost(event.target.value)} /></label><label>Seed username<input value={seedUsername} onChange={event => setSeedUsername(event.target.value)} /></label><label>Seed password<input type="password" value={seedPassword} onChange={event => setSeedPassword(event.target.value)} /></label></div>
+    <div className="pull-actions"><div className="privacy-note"><LockKeyhole /> Discovery runs fixed LLDP and kernel-neighbor commands only.</div><button className="button primary" disabled={busy} onClick={discover}>{busy ? <RefreshCw className="spin" /> : <Search />} Discover neighbors</button></div>
+    {session && <><div className="queue-summary"><b>{session.devices.length}</b> discovered · session {session.status.replace('_', ' ')}</div><div className="table-scroll"><table><thead><tr><th>ADDRESS</th><th>MAC</th><th>DEPTH</th><th>EVIDENCE</th><th>VENDOR</th><th>PROCESSING</th><th>AUDIT</th></tr></thead><tbody>{session.devices.map(item => <tr key={item.id}><td className="mono">{item.address}</td><td className="mono">{item.mac_address ?? '—'}</td><td>{item.depth}</td><td>{item.discovery_sources.join(' + ')}</td><td>{item.vendor_hint ?? 'Profile required'}</td><td><StatusPill status={item.status.replace('_', ' ').toUpperCase()} /></td><td>{item.config_id ? <button className="small-button" onClick={() => navigate('status', item.config_id!)}>Open audit</button> : item.status === 'needs_input' ? 'Credentials required below' : '—'}</td></tr>)}</tbody></table></div>
+      {session.devices.filter(item => item.status === 'needs_input').map(item => <div key={item.id} className="training-alert"><AlertTriangle /><div><b>{item.address} needs connection details</b><span>ARP/kernel evidence discovered the address, but it cannot prove vendor or credentials. For the demo Cirotech device, use the fixed Telnet profile.</span><div className="connection-grid compact"><label>Neighbor username<input value={neighborUsername} onChange={event => setNeighborUsername(event.target.value)} /></label><label>Neighbor password<input type="password" value={neighborPassword} onChange={event => setNeighborPassword(event.target.value)} /></label><label>Transport<select value={transport} onChange={event => { const value = event.target.value as 'ssh' | 'telnet'; setTransport(value); if (value === 'telnet') setVendor('Cirotech') }}><option value="telnet">Telnet · isolated LAN</option><option value="ssh">SSH</option></select></label><label>Fixed command profile<select value={vendor} onChange={event => setVendor(event.target.value)}><option value="Cirotech">Cirotech Linux shell</option><option value="cisco">Cisco IOS / IOS-XE</option><option value="juniper">Juniper JunOS</option><option value="fortinet">Fortinet FortiOS</option><option value="OpenWrt">OpenWrt UCI</option></select></label><label>Device name<input value={deviceName} onChange={event => setDeviceName(event.target.value)} /></label></div></div><div className="pull-actions"><button className="button ghost" disabled={busy} onClick={() => skip(item.id)}>Not a router</button><button className="button primary" disabled={busy} onClick={() => audit(item.id)}><Network /> Continue pull &amp; audit</button></div></div>)}</>}
+    {error && <ErrorState message={error} />}
+  </Card>
+}
+
 const VENDOR_LABELS: Record<ConfigVendor, string> = {
-  cisco: 'Cisco IOS / IOS-XE', juniper: 'Juniper JunOS',
+  cisco: 'Cisco IOS / IOS-XE', juniper: 'Juniper JunOS', fortinet: 'Fortinet FortiGate / FortiOS',
 }
 const FRAMEWORK_LABELS: Record<FrameworkKey, string> = {
   cis_cisco_ios_v1: 'CIS Benchmark v1.0.0',
@@ -129,33 +218,45 @@ function Overview({ items, loading, error, refresh, navigate }: { items: ConfigL
     <div className="metrics"><Metric label="Devices Audited" value={String(complete.length)} detail={`${items.length} total configurations`} /><Metric label="Average Compliance" value={average == null ? '—' : `${average.toFixed(1)}%`} detail="Across completed audits" tone="cyan-text" /><Metric label="Failed Controls" value={String(failed)} detail="Across completed devices" tone="red-text" /><Metric label="Awaiting Training" value={String(waiting.length)} detail="Operator review required" tone="amber-text" /><Metric label="Frameworks" value="4" detail="Deterministic catalogues" /></div>
     {loading && !items.length ? <LoadingState /> : <><div className="dashboard-grid"><Card className="fleet-card"><SectionTitle eyebrow="POSTURE / CURRENT FLEET" title="Fleet Compliance" action={<button className="text-button" onClick={() => navigate('audits')}>View audits <ArrowRight /></button>} /><div className="fleet-body"><div className="donut" style={{ '--score': `${average ?? 0}%` } as React.CSSProperties}><div><b>{average == null ? '—' : `${average.toFixed(1)}%`}</b><span>COMPLIANCE</span></div></div><div className="legend"><div><span className="legend-dot pass" /><b>{passed}</b><small>PASS</small></div><div><span className="legend-dot fail" /><b>{failed}</b><small>FAIL</small></div><div><span className="legend-dot na" /><b>{na}</b><small>N/A</small></div></div></div><div className="cycle"><span>Evaluated controls</span><b>{totalControls}</b><strong>{complete.length} devices</strong></div></Card>
       <Card className="training-card"><SectionTitle eyebrow="HUMAN-IN-THE-LOOP" title="Training Queue" description="Safety gates requiring operator review." action={<button className="text-button" onClick={() => navigate('training')}>Open queue <ArrowRight /></button>} />{waiting.length ? waiting.slice(0, 4).map(item => <div className="queue-row" key={item.id}><div className="device-icon"><Network /></div><div className="queue-copy"><b>{item.device_name}</b><span>{item.vendor.toUpperCase()} {item.os_type.toUpperCase()} · <strong>syntax review required</strong></span></div><button className="small-button" onClick={() => navigate('training', item.id)}>Review</button></div>) : <EmptyState title="Training queue clear" detail="No audits are waiting for operator mappings." />}</Card></div>
-      <Card className="table-card"><SectionTitle eyebrow="AUDIT ACTIVITY" title="Recent Audits" action={<button className="text-button" onClick={() => navigate('audits')}>View all audits <ArrowRight /></button>} />{items.length ? <AuditTable items={items} compact navigate={navigate} /> : <EmptyState title="No audits yet" detail="Upload a Cisco or Juniper configuration to begin a deterministic compliance audit." action={<button className="button primary" onClick={() => navigate('upload')}><Upload /> Upload config</button>} />}</Card></>}
+      <Card className="table-card"><SectionTitle eyebrow="AUDIT ACTIVITY" title="Recent Audits" action={<button className="text-button" onClick={() => navigate('audits')}>View all audits <ArrowRight /></button>} />{items.length ? <AuditTable items={items} compact navigate={navigate} /> : <EmptyState title="No audits yet" detail="Upload a Cisco, Juniper, or Fortinet configuration to begin a deterministic compliance audit." action={<button className="button primary" onClick={() => navigate('upload')}><Upload /> Upload config</button>} />}</Card></>}
   </div>
 }
 
 function UploadView({ navigate, refreshFleet }: { navigate: (view: ValsecView, id?: string) => void; refreshFleet: () => void }) {
   const [files, setFiles] = useState<File[]>([])
   const [deviceName, setDeviceName] = useState('')
-  const [vendor, setVendor] = useState<ConfigVendor>('cisco')
+  const [vendor, setVendor] = useState('cisco')
+  const [customVendor, setCustomVendor] = useState('')
+  const [vendorHintText, setVendorHintText] = useState('')
   const [framework, setFramework] = useState<FrameworkKey>('cis_cisco_ios_v1')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const input = useRef<HTMLInputElement>(null)
+  const vendorValue = vendor === '__other__' ? customVendor.trim() : vendor
+  const vendorLabel = VENDOR_LABELS[vendorValue] ?? vendorValue.toUpperCase()
   const addFiles = (incoming: File[]) => setFiles(current => [...current, ...incoming.filter(file => !current.some(item => item.name === file.name && item.size === file.size))])
   const submit = async () => {
     if (!files.length) { setError('Choose at least one configuration file.'); return }
+    const vendorHints: Record<string, string> = {}
+    for (const raw of vendorHintText.split('\n')) {
+      const row = raw.trim()
+      if (!row) continue
+      const separator = row.indexOf('=')
+      if (separator < 1 || !row.slice(separator + 1).trim()) {
+        setError(`Use “filename.cfg = Vendor Name” for each vendor hint.`)
+        return
+      }
+      vendorHints[row.slice(0, separator).trim()] = row.slice(separator + 1).trim()
+    }
     setSubmitting(true); setError(null)
     try {
-      const uploaded: Array<{ config_id: string }> = []
-      for (const file of files) {
-        const response = await uploadConfig(file, files.length === 1 ? deviceName : undefined, vendor, framework)
-        uploaded.push(...response.configs)
-      }
+      const response = await uploadConfig(files, files.length === 1 ? deviceName : undefined, vendorValue, framework, vendorHints)
+      const uploaded = response.configs
       refreshFleet()
       navigate('status', uploaded[0].config_id)
     } catch (cause) { setError(errorMessage(cause)) } finally { setSubmitting(false) }
   }
-  return <div className="page"><SectionTitle eyebrow="AUDIT / INGEST" title="Upload Configuration" description="Start compliance audits from one or more Cisco IOS or Juniper JunOS exports." /><div className="upload-layout"><div><Card className="drop-card"><div className="drop-zone" onClick={() => input.current?.click()} onDrop={event => { event.preventDefault(); addFiles(Array.from(event.dataTransfer.files)) }} onDragOver={event => event.preventDefault()}><input ref={input} type="file" multiple hidden accept=".cfg,.txt,.conf,.zip" onChange={event => addFiles(Array.from(event.target.files ?? []))} /><div className="upload-icon"><Upload /></div><h3>Drop configuration files here</h3><p>or <b>browse files</b></p><small>CFG, TXT, CONF · 5 MiB each · ZIP up to 50 configs / 25 MiB expanded</small></div><div className="privacy-note"><LockKeyhole /> Configuration data remains inside the local environment.</div></Card><Card className="file-card"><SectionTitle eyebrow="UPLOAD QUEUE" title={`${files.length} file${files.length === 1 ? '' : 's'} ready`} />{files.length ? files.map(file => <div className="file-row" key={`${file.name}-${file.size}`}><FileCode2 /><div><b>{file.name}</b><small>{(file.size / 1024).toFixed(1)} KiB · {VENDOR_LABELS[vendor]}</small></div><StatusPill status="READY" /><button className="icon-button" aria-label={`Remove ${file.name}`} onClick={() => setFiles(current => current.filter(item => item !== file))}><Trash2 /></button></div>) : <EmptyState title="Upload queue empty" detail="Supported extensions are .cfg, .txt, .conf, and .zip." />}</Card></div><Card className="settings-card"><SectionTitle eyebrow="AUDIT CONFIGURATION" title="Run settings" /><label>Device hostname<input value={deviceName} disabled={files.length > 1} placeholder={files.length > 1 ? 'Derived from each filename' : 'Optional override'} onChange={event => setDeviceName(event.target.value)} /></label><label>Target vendor<select value={vendor} onChange={event => setVendor(event.target.value as ConfigVendor)}><option value="cisco">Cisco IOS / IOS-XE</option><option value="juniper">Juniper JunOS</option></select></label><label>Framework<select value={framework} onChange={event => setFramework(event.target.value as FrameworkKey)}>{Object.entries(FRAMEWORK_LABELS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label><div className="switch-row"><span>Source traces<small>Raw configuration lines are retained with normalized findings.</small></span><CheckCircle2 /></div><div className="switch-row"><span>PDF report<small>Generated automatically when the audit completes.</small></span><CheckCircle2 /></div>{error && <ErrorState message={error} />}<button className="button primary full" disabled={submitting || !files.length} onClick={submit}>{submitting ? <><RefreshCw className="spin" /> Uploading {files.length} file{files.length === 1 ? '' : 's'}</> : <><Play /> Start Compliance Audit</>}</button><button className="button ghost full" disabled={submitting} onClick={() => { setFiles([]); setError(null) }}>Clear queue</button></Card></div></div>
+  return <div className="page"><SectionTitle eyebrow="AUDIT / INGEST" title="Upload Configuration" description="Audit routers, switches, and firewalls from supported vendors, or teach Valsec an unfamiliar syntax." /><DiscoverNeighborCard navigate={navigate} refreshFleet={refreshFleet} /><PullDeviceCard navigate={navigate} refreshFleet={refreshFleet} /><div className="upload-layout"><div><Card className="drop-card"><div className="drop-zone" onClick={() => input.current?.click()} onDrop={event => { event.preventDefault(); addFiles(Array.from(event.dataTransfer.files)) }} onDragOver={event => event.preventDefault()}><input ref={input} type="file" multiple hidden accept=".cfg,.txt,.conf,.zip" onChange={event => addFiles(Array.from(event.target.files ?? []))} /><div className="upload-icon"><Upload /></div><h3>Drop configuration files here</h3><p>or <b>browse files</b></p><small>CFG, TXT, CONF · 5 MiB each · ZIP up to 50 configs / 25 MiB expanded</small></div><div className="privacy-note"><LockKeyhole /> Configuration data remains inside the local environment.</div></Card><Card className="file-card"><SectionTitle eyebrow="UPLOAD QUEUE" title={`${files.length} file${files.length === 1 ? '' : 's'} ready`} />{files.length ? files.map(file => <div className="file-row" key={`${file.name}-${file.size}`}><FileCode2 /><div><b>{file.name}</b><small>{(file.size / 1024).toFixed(1)} KiB · vendor auto-detected where supported</small></div><StatusPill status="READY" /><button className="icon-button" aria-label={`Remove ${file.name}`} onClick={() => setFiles(current => current.filter(item => item !== file))}><Trash2 /></button></div>) : <EmptyState title="Upload queue empty" detail="Supported extensions are .cfg, .txt, .conf, and .zip." />}</Card></div><Card className="settings-card"><SectionTitle eyebrow="AUDIT CONFIGURATION" title="Run settings" /><label>Device hostname<input value={deviceName} disabled={files.length > 1} placeholder={files.length > 1 ? 'Derived from each filename' : 'Optional override'} onChange={event => setDeviceName(event.target.value)} /></label><label>Fallback vendor for unrecognized files<select value={vendor} onChange={event => { const selected = event.target.value; setVendor(selected); if ((selected === '__other__' || selected === 'fortinet') && framework !== 'nist_sp_800_53_rev5') setFramework('nist_sp_800_53_rev5') }}><option value="cisco">Cisco IOS / IOS-XE</option><option value="juniper">Juniper JunOS</option><option value="fortinet">Fortinet FortiGate / FortiOS</option><option value="__other__">Other · teach by example</option></select><small>Cisco, Juniper, and Fortinet are detected per file and take precedence.</small></label>{vendor === '__other__' && <label>Fallback vendor identifier<input value={customVendor} maxLength={64} placeholder="For example: Acme EdgeOS" onChange={event => setCustomVendor(event.target.value)} /><small>Stored as entered and used to scope learned mappings.</small></label>}<label>Per-file vendor hints (optional)<textarea rows={3} value={vendorHintText} onChange={event => setVendorHintText(event.target.value)} placeholder={'acme-edgeos.cfg = Acme EdgeOS\nanother-vendor.cfg = Another Vendor'} /><small>For mixed ZIPs, use the member path or filename before “=”. Each unknown vendor keeps its own learned mappings.</small></label><label>Framework<select value={framework} onChange={event => setFramework(event.target.value as FrameworkKey)}>{Object.entries(FRAMEWORK_LABELS).map(([key, label]) => <option key={key} value={key} disabled={vendor === 'fortinet' && key !== 'nist_sp_800_53_rev5'}>{label}</option>)}</select></label><div className="switch-row"><span>Source traces<small>Raw configuration lines are retained with normalized findings.</small></span><CheckCircle2 /></div><div className="switch-row"><span>PDF report<small>Generated automatically when the audit completes.</small></span><CheckCircle2 /></div>{error && <ErrorState message={error} />}<button className="button primary full" disabled={submitting || !files.length || !vendorValue} onClick={submit}>{submitting ? <><RefreshCw className="spin" /> Uploading {files.length} file{files.length === 1 ? '' : 's'}</> : <><Play /> Start Compliance Audit</>}</button><button className="button ghost full" disabled={submitting} onClick={() => { setFiles([]); setError(null) }}>Clear queue</button></Card></div></div>
 }
 
 function FleetAudits({ items, loading, error, refresh, navigate }: { items: ConfigListItem[]; loading: boolean; error: string | null; refresh: () => void; navigate: (view: ValsecView, id?: string) => void }) {
@@ -226,11 +327,41 @@ function TrainingView({ configs, configId, navigate, refreshFleet }: { configs: 
   return <div className="page"><SectionTitle eyebrow="AUDIT / HUMAN REVIEW" title="Training Queue" description="Approve canonical schema mappings. Approved patterns are retained for future audits." action={<div className="queue-summary"><b>{waiting.length}</b><span>devices waiting</span><b>{lines.length}</b><span>lines on this device</span></div>} />{error && <ErrorState message={error} retry={load} />}{loading ? <LoadingState label="Loading unverified source lines" /> : !line ? <LoadingState label="Mappings saved; waiting for audit to resume" /> : <div className="training-shell"><div className="training-device"><div className="device-header"><div><span className="eyebrow">SELECTED DEVICE</span><h3>{selectedConfig.device_name}</h3><p>{selectedConfig.vendor.toUpperCase()} {selectedConfig.os_type.toUpperCase()} · Audit paused</p></div><StatusPill status="AWAITING TRAINING" /></div><div className="code-panel"><div className="code-toolbar"><span><Terminal /> RAW CONFIGURATION LINE</span><small>Line {line.line_number ?? 'unknown'}</small></div><pre><code><span>{line.line_number ?? '—'}</span><mark>{line.raw_source_line}</mark></code></pre><div className="source-tag"><FileText /> Source trace retained</div></div><div className="training-list"><span>UNVERIFIED LINES</span>{lines.map((item, index) => <button className={index === selectedIndex ? 'active' : ''} key={item.id} onClick={() => setSelectedIndex(index)}><code>{item.raw_source_line}</code><small>line {item.line_number ?? '—'}</small></button>)}</div></div><div className="proposal"><div className="proposal-header"><div><span className="eyebrow cyan">OPERATOR MAPPING</span><h3>Canonical schema mapping</h3></div><span className="confidence-badge">HUMAN VERIFIED</span></div><div className="mapping-arrow"><code>{line.raw_source_line}</code><ArrowRight /><code>{field}</code></div><div className="callout"><Zap /><p>{line.ai_suggested_schema_field ? `Local Ollama proposed ${line.ai_suggested_schema_field} at ${Math.round((line.ai_confidence ?? 0) * 100)}% confidence. Review the field and parsed value before approval.` : 'Local Ollama did not return a valid candidate. Select the canonical field and parsed JSON value explicitly.'}</p></div><label>Select canonical schema field<select value={field} onChange={event => setField(event.target.value)}>{SCHEMA_FIELDS.map(option => <option key={option}>{option}</option>)}</select></label><label>Parsed value (JSON or text)<input className="mapping-value" value={value} onChange={event => setValue(event.target.value)} /></label><div className="proposal-note"><ShieldCheck /><span>This approval affects normalization only. The deterministic framework engine remains the sole source of PASS / FAIL verdicts.</span></div><div className="proposal-actions"><button className="button ghost" disabled={selectedIndex === 0} onClick={() => setSelectedIndex(index => index - 1)}>Previous</button><button className="button primary" disabled={submitting} onClick={submit}>{submitting ? <><RefreshCw className="spin" /> Saving</> : <><Check /> Teach &amp; Resume</>}</button></div><div className="deterministic"><span>Operator-approved classification</span><ArrowRight /><b>deterministic compliance evaluation</b></div></div></div>}</div>
 }
 
-function ResultRow({ result }: { result: ComplianceResult }) {
+function ResultRow({ result, configId, vendor, refresh }: { result: ComplianceResult; configId: string; vendor: string; refresh: () => void }) {
   const [expanded, setExpanded] = useState(result.verdict === 'FAIL')
-  return <div className={`finding-row ${expanded ? 'expanded' : ''}`}><div className="finding-main"><button className="expand" onClick={() => setExpanded(value => !value)}>{expanded ? <ChevronDown /> : <ChevronRight />}</button><div><b>{result.control_id}</b><span>{result.title}</span></div></div><StatusPill status={result.verdict === 'NOT_APPLICABLE' ? 'N/A' : result.verdict} /><span className={`severity ${result.severity.toLowerCase()}`}>{result.severity.toUpperCase()}</span><code>{result.observed_value ?? 'No observed value'}</code><button className="row-action" onClick={() => setExpanded(value => !value)}><ChevronRight /></button>{expanded && <div className="finding-detail"><div><span>DETERMINISTIC EVALUATION</span><p>{result.description}</p></div><div><span>OBSERVED CONFIGURATION</span><pre>{result.observed_value ?? 'No observed configuration was recorded.'}</pre></div><div className={`verdict-box ${result.verdict.toLowerCase()}`}><div><span>DETERMINISTIC VERDICT</span><b>{result.verdict === 'NOT_APPLICABLE' ? 'N/A' : result.verdict}</b><small>Evaluated against normalized configuration data.</small></div><div><span>VERDICT SOURCE</span><b>Deterministic framework rule engine</b></div></div>{result.remediation_cli && <div className="remediation"><div className="remediation-title"><div><span>RECOMMENDED REMEDIATION</span><h4>{result.is_remediation_fallback ? 'Local AI Fallback · Review Required' : 'Deterministic Rule Template'}</h4></div><button className="button ghost" onClick={() => navigator.clipboard?.writeText(result.remediation_cli ?? '')}><Clipboard /> Copy CLI Commands</button></div><pre>{result.remediation_cli}</pre></div>}</div>}</div>
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [host, setHost] = useState('')
+  const [port, setPort] = useState('22')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirmRisky, setConfirmRisky] = useState(false)
+  const [diff, setDiff] = useState(result.remediation_action?.diff_summary ?? '')
+  const action = result.remediation_action
+  const vendorKey = vendor.toLowerCase()
+  const genericRiskBlocked = Boolean(action?.risky && !['cisco', 'juniper'].includes(vendorKey))
+  const unsupportedVendor = ['fortinet', 'fortios', 'fortigate'].includes(vendorKey)
+  const approve = async () => {
+    setBusy(true); setError(null)
+    try { await approveRemediation(configId, result.id); refresh() }
+    catch (cause) { setError(errorMessage(cause)) }
+    finally { setBusy(false) }
+  }
+  const apply = async (confirmedRisk = false) => {
+    if (!host.trim() || !username.trim() || !password) { setError('Host, username, and password are required to apply this change.'); return }
+    if (action?.risky && !confirmedRisk) { setConfirmRisky(true); return }
+    setBusy(true); setError(null)
+    try {
+      const response = await applyRemediation(configId, result.id, {
+        host: host.trim(), port: Number(port), username: username.trim(), password,
+        confirm_risky: confirmedRisk,
+      })
+      setPassword(''); setConfirmRisky(false); setDiff(response.diff_summary); refresh()
+    } catch (cause) { setError(errorMessage(cause)) }
+    finally { setPassword(''); setBusy(false) }
+  }
+  return <div className={`finding-row ${expanded ? 'expanded' : ''}`}><div className="finding-main"><button className="expand" onClick={() => setExpanded(value => !value)}>{expanded ? <ChevronDown /> : <ChevronRight />}</button><div><b>{result.control_id}</b><span>{result.title}</span></div></div><StatusPill status={result.verdict === 'NOT_APPLICABLE' ? 'N/A' : result.verdict} /><span className={`severity ${result.severity.toLowerCase()}`}>{result.severity.toUpperCase()}</span><code>{result.observed_value ?? 'No observed value'}</code><button className="row-action" onClick={() => setExpanded(value => !value)}><ChevronRight /></button>{expanded && <div className="finding-detail"><div><span>DETERMINISTIC EVALUATION</span><p>{result.description}</p></div><div><span>OBSERVED CONFIGURATION</span><pre>{result.observed_value ?? 'No observed configuration was recorded.'}</pre></div><div className={`verdict-box ${result.verdict.toLowerCase()}`}><div><span>DETERMINISTIC VERDICT</span><b>{result.verdict === 'NOT_APPLICABLE' ? 'N/A' : result.verdict}</b><small>Evaluated against normalized configuration data.</small></div><div><span>VERDICT SOURCE</span><b>Deterministic framework rule engine</b></div></div>{result.remediation_cli && <div className="remediation"><div className="remediation-title"><div><span>RECOMMENDED REMEDIATION</span><h4>{result.is_remediation_fallback ? 'Local AI Fallback · Review Required' : 'Deterministic Rule Template'}</h4></div><button className="button ghost" onClick={() => navigator.clipboard?.writeText(result.remediation_cli ?? '')}><Clipboard /> Copy CLI Commands</button></div><pre>{result.remediation_cli}</pre><div className="remediation-apply"><div className="approval-state"><ShieldCheck /><span>{action ? `Operator approval: ${action.status.toUpperCase()}${action.risky ? ' · RISKY CHANGE' : ''}` : 'Review the exact commands above before approval.'}</span></div>{!action && <button className="button ghost" disabled={busy} onClick={approve}><Check /> Approve exact remediation</button>}{action && action.status !== 'applied' && !unsupportedVendor && !genericRiskBlocked && <><div className="connection-grid compact"><label>Device host<input value={host} placeholder="192.168.1.1" onChange={event => setHost(event.target.value)} /></label><label>SSH port<input type="number" min={1} max={65535} value={port} onChange={event => setPort(event.target.value)} /></label><label>Username<input autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} /></label><label>Password<input type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} /></label></div><button className="button primary" disabled={busy} onClick={() => void apply(false)}>{busy ? <><RefreshCw className="spin" /> Applying</> : <><Terminal /> Apply to device</>}</button></>}{unsupportedVendor && <div className="risk-warning"><AlertTriangle /><span>Automatic push does not yet have a safe FortiOS transaction procedure. Apply this approved text manually.</span></div>}{genericRiskBlocked && <div className="risk-warning"><AlertTriangle /><span>Risky UCI changes require manual application because this device has no automatic rollback.</span></div>}{confirmRisky && <div className="risk-confirm"><AlertTriangle /><div><b>This change may disconnect your management session.</b><span>Confirm that you reviewed the device recovery path before applying.</span></div><button className="button danger" disabled={busy} onClick={() => void apply(true)}>Apply risky change anyway</button><button className="button ghost" onClick={() => setConfirmRisky(false)}>Cancel</button></div>}{error && <ErrorState message={error} />}{(diff || action?.diff_summary) && <div className="change-evidence"><span>BEFORE / AFTER CONFIGURATION DIFF</span><pre>{diff || action?.diff_summary}</pre></div>}</div></div>}</div>}</div>
 }
-
 function ReportView({ config, configId }: { config?: ConfigListItem; configId?: string }) {
   const [data, setData] = useState<ConfigResultsResponse | null>(null)
   const [loading, setLoading] = useState(true)
@@ -252,19 +383,19 @@ function ReportView({ config, configId }: { config?: ConfigListItem; configId?: 
     {loading && !data ? <LoadingState label="Loading compliance results" /> : data && <>
       <Card className="identity"><div><div className="device-icon large"><Network /></div><div><h3>{config?.device_name ?? 'Configuration'}</h3><p>{data.vendor.toUpperCase()} {data.os_type.toUpperCase()}</p></div></div><div><span>FRAMEWORK</span><b>{data.framework_label}</b></div><div><span>COMPLETED</span><b>{formatDate(config?.completed_at ?? null)}</b></div></Card>
       <div className="report-hero"><Card className="score-card"><div className="eyebrow">OVERALL COMPLIANCE</div><div className="score-line"><strong>{score.toFixed(1)}%</strong><div className="mini-donut" style={{ background: `conic-gradient(var(--cyan) ${score}%, #26323b 0)` }} /></div><div className="score-legend"><span><i className="pass" />PASS <b>{data.total_passed}</b></span><span><i className="fail" />FAIL <b>{data.total_failed}</b></span><span><i className="na" />N/A <b>{data.total_na}</b></span></div></Card><Card className="severity-card"><SectionTitle eyebrow="FAILED CONTROLS BY SEVERITY" title={`${data.total_failed} controls require remediation`} /><div className="severity-bars">{Object.entries(data.severity_counts).map(([severity, count]) => <div key={severity}><span>{severity.toUpperCase()}</span><div className="progress"><span className={severity === 'Critical' ? 'red' : severity === 'High' || severity === 'Medium' ? 'amber' : 'cyan'} style={{ width: `${(count / maxSeverity) * 100}%` }} /></div><b>{count}</b></div>)}</div><div className="trust"><ShieldCheck /><span>Verdicts generated by deterministic rule engine</span></div></Card></div>
-      <Card className="findings"><SectionTitle eyebrow="FRAMEWORK CONTROL RESULTS" title="Compliance Findings" action={<div className="filter-chips">{([['ALL','All'],['FAIL','FAIL'],['PASS','PASS'],['NOT_APPLICABLE','N/A']] as const).map(([value, label]) => <button className={filter === value ? 'selected' : ''} key={value} onClick={() => setFilter(value)}>{label}</button>)}</div>} /><div className="finding-row finding-head"><span>CONTROL / TITLE</span><span>VERDICT</span><span>SEVERITY</span><span>OBSERVED VALUE</span><span /></div>{results.length ? results.map(result => <ResultRow key={result.control_id} result={result} />) : <EmptyState title="No matching controls" detail="Choose another verdict filter." />}</Card>
+      <Card className="findings"><SectionTitle eyebrow="FRAMEWORK CONTROL RESULTS" title="Compliance Findings" action={<div className="filter-chips">{([['ALL','All'],['FAIL','FAIL'],['PASS','PASS'],['NOT_APPLICABLE','N/A']] as const).map(([value, label]) => <button className={filter === value ? 'selected' : ''} key={value} onClick={() => setFilter(value)}>{label}</button>)}</div>} /><div className="finding-row finding-head"><span>CONTROL / TITLE</span><span>VERDICT</span><span>SEVERITY</span><span>OBSERVED VALUE</span><span /></div>{results.length ? results.map(result => <ResultRow key={result.id} result={result} configId={configId} vendor={data.vendor} refresh={load} />) : <EmptyState title="No matching controls" detail="Choose another verdict filter." />}</Card>
     </>}
   </div>
 }
 
 function FrameworksView() {
   const frameworks = [
-    ['CIS Benchmark', '23 Cisco / 11 Juniper controls', 'v1.0.0'],
-    ['NIST SP 800-53', '8 representative controls', 'Rev. 5'],
-    ['DISA Network Device STIG', '6 representative controls', 'V1R1'],
-    ['ISO/IEC 27001', '6 representative controls', '2022'],
+    ['CIS Benchmark', '23 Cisco / 11 Juniper controls', 'Cisco IOS and Juniper JunOS', 'v1.0.0'],
+    ['NIST SP 800-53', '8 neutral / 7 Fortinet controls', 'Cisco, Juniper, Fortinet, and learned vendors', 'Rev. 5'],
+    ['DISA Network Device STIG', '6 representative controls', 'Cisco, Juniper, and learned vendors', 'V1R1'],
+    ['ISO/IEC 27001', '6 representative controls', 'Cisco, Juniper, and learned vendors', '2022'],
   ]
-  return <div className="page"><SectionTitle eyebrow="KNOWLEDGE / RULE TABLES" title="Compliance Frameworks" description="Modular rule catalogues evaluate the same vendor-neutral evidence deterministically." /><div className="framework-grid">{frameworks.map(([name, coverage, version]) => <Card className="framework active-framework" key={name}><div className="framework-top"><ShieldCheck /><StatusPill status="ACTIVE" /></div><h3>{name}</h3><p>{coverage} across Cisco IOS/IOS-XE and Juniper JunOS normalization.</p><div className="framework-stat"><b>{version}</b><span>version</span></div><div className="framework-foot"><span>Deterministic rules</span><b>SUPPORTED</b></div></Card>)}</div></div>
+  return <div className="page"><SectionTitle eyebrow="KNOWLEDGE / RULE TABLES" title="Compliance Frameworks" description="Modular rule catalogues evaluate the same vendor-neutral evidence deterministically." /><div className="framework-grid">{frameworks.map(([name, coverage, platforms, version]) => <Card className="framework active-framework" key={name}><div className="framework-top"><ShieldCheck /><StatusPill status="ACTIVE" /></div><h3>{name}</h3><p>{coverage} across {platforms}.</p><div className="framework-stat"><b>{version}</b><span>version</span></div><div className="framework-foot"><span>Deterministic rules</span><b>SUPPORTED</b></div></Card>)}</div></div>
 }
 
 function CommandPalette({ close, navigate }: { close: () => void; navigate: (view: ValsecView, id?: string) => void }) {

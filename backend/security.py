@@ -5,7 +5,6 @@
   * Cryptographically-random 6-digit email OTP, stored *hashed* in Redis with
     TTL, single-use, per-code attempt limit, and resend cooldown
   * Opaque Redis-backed browser sessions (HttpOnly cookie -> session:<tok>)
-  * Hostname-boundary domain matching for scan authorization
   * FastAPI current-user dependencies
 
 Plaintext passwords and OTP codes are never stored or returned. OTP codes and
@@ -211,22 +210,6 @@ def destroy_session(token: str, r: Optional[_redis.Redis] = None) -> None:
         return
     r = r or get_redis()
     r.delete(_session_key(token))
-
-
-# ── Hostname-boundary domain matching (scan authorization) ───────────────────
-def domain_covers(verified_domain: str, target: str) -> bool:
-    """Does ownership of `verified_domain` authorize scanning `target`?
-
-    Label-boundary match, NOT a naive suffix check:
-      verified example.com  -> example.com, api.example.com, a.b.example.com  ✓
-                            -> attackerexample.com, example.com.attacker.net  ✗
-      verified api.example.com -> example.com  ✗  (a subdomain doesn't grant the parent)
-    """
-    v = (verified_domain or "").strip().lower().rstrip(".")
-    t = (target or "").strip().lower().rstrip(".")
-    if not v or not t:
-        return False
-    return t == v or t.endswith("." + v)
 
 
 # ── FastAPI dependencies ─────────────────────────────────────────────────────

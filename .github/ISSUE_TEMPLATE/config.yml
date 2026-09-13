@@ -4,8 +4,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Question / discussion
-    url: https://github.com/maverickaayush/ONUS/discussions
-    about: Ask how something works, share what you're scanning, or propose an idea before filing a formal issue.
+    url: https://github.com/maverickaayush/valsec/discussions
+    about: Ask how something works, share your deployment context, or propose an idea before filing a formal issue.
   - name: Report a security vulnerability
-    url: https://github.com/maverickaayush/ONUS/security/advisories/new
+    url: https://github.com/maverickaayush/valsec/security/advisories/new
     about: Please report vulnerabilities privately here, never as a public issue (see SECURITY.md).

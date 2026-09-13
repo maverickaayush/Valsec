@@ -46,11 +46,13 @@ def test_unverified_response_exposes_real_ai_proposal_and_null_without_one(monke
     ai = SimpleNamespace(
         id=uuid4(), raw_source_line="vendor secure-shell generation 2", line_number=44,
         schema_field="ssh.version", mapping_source="ai_proposal",
+        confidence=ConfidenceTier.probable,
         field_value={"field_value": 2, "ai_confidence": 0.83},
     )
     parser_only = SimpleNamespace(
         id=uuid4(), raw_source_line="future command", line_number=45,
         schema_field="unrecognized", mapping_source="parser", field_value={"context": None},
+        confidence=ConfidenceTier.unverified,
     )
     monkeypatch.setattr(training, "get_owned_config_or_404", lambda *_: config)
     payload = training.get_unverified_findings(str(config.id), None, Db([ai, parser_only]))
@@ -60,9 +62,11 @@ def test_unverified_response_exposes_real_ai_proposal_and_null_without_one(monke
     assert first["ai_suggested_schema_field"] == "ssh.version"
     assert first["ai_suggested_field"] == "ssh.version"
     assert first["ai_confidence"] == pytest.approx(0.83)
+    assert first["confidence"] == "probable"
     assert second["ai_suggested_schema_field"] is None
     assert second["ai_suggested_field"] is None
     assert second["ai_confidence"] is None
+    assert second["confidence"] == "unverified"
 
 
 @pytest.mark.parametrize("endpoint", ["get", "post"])
@@ -143,11 +147,13 @@ class TxDb:
 def test_training_transaction_scopes_mapping_and_claims_resume(monkeypatch):
     user_id = uuid4()
     config = _config()
+    config.vendor = "Acme EdgeOS"
+    config.os_type = "unknown"
     config.user_id = user_id
     finding = SimpleNamespace(
         id=uuid4(), raw_source_line="vendor ssh generation 2",
         schema_field="unrecognized", field_value={"context": None},
-        confidence=ConfidenceTier.unverified, mapping_source="parser",
+        confidence=ConfidenceTier.probable, mapping_source="ai_proposal",
     )
     config_query, finding_query, mapping_query = TxQuery(config), TxQuery(finding), TxQuery(None)
     db = TxDb([config_query, finding_query, mapping_query, TxQuery(count_value=0)])
@@ -165,6 +171,7 @@ def test_training_transaction_scopes_mapping_and_claims_resume(monkeypatch):
     assert config.status == ConfigStatus.normalising
     assert finding.confidence == "confirmed"
     assert len(db.added) == 1 and db.added[0].user_id == user_id
+    assert db.added[0].vendor == "Acme EdgeOS"
     assert db.added[0].schema_field == "ssh.version"
     assert config_query.locked and finding_query.locked and mapping_query.locked
     dispatch.assert_called_once()
@@ -294,6 +301,47 @@ def test_pdf_uses_real_juniper_and_framework_metadata():
     assert "set system services ssh protocol-version v2" in text
     for obsolete in ("ONUS", "VAPT", "CVSS", "OWASP"):
         assert obsolete not in text.upper()
+
+
+def test_pdf_uses_fortinet_identity_nist_verdict_and_fortios_remediation():
+    config = _config()
+    config.vendor = "fortinet"
+    config.os_type = "fortios"
+    config.firmware_version = "7.4.3"
+    config.selected_framework = "nist_sp_800_53_rev5"
+    result = ComplianceResult(
+        control_id="AC-17", title="Restrict remote administration to encrypted protocols",
+        framework="NIST SP 800-53 Rev. 5", severity="High",
+        verdict=ComplianceVerdict.FAIL, observed_detail="Administrative access permits HTTP.",
+        remediation_reference="fortios.management.secure",
+    )
+    text = _pdf_text(generate_compliance_pdf(config, ComplianceReport((result,), 0.0, 0, 1, 0)))
+    assert "FORTINET FORTIOS SECURITY COMPLIANCE AUDIT" in text.upper()
+    assert "NIST SP 800-53" in text and "7.4.3" in text
+    assert "FAIL" in text and "set allowaccess ping https ssh" in text
+
+
+def test_fortinet_pdf_marks_ai_fallback_when_no_template_exists():
+    config = _config()
+    config.vendor = "fortinet"
+    config.os_type = "fortios"
+    config.selected_framework = "nist_sp_800_53_rev5"
+    result = ComplianceResult(
+        control_id="IA-5", title="Protect stored administrator credentials",
+        framework="NIST SP 800-53 Rev. 5", severity="High",
+        verdict=ComplianceVerdict.FAIL, observed_detail="Credential protection is not confirmed.",
+        remediation_reference="fortios.password.encryption",
+    )
+    report = ComplianceReport((result,), 0.0, 0, 1, 0)
+    text = _pdf_text(generate_compliance_pdf(
+        config, report,
+        remediations={"IA-5": Remediation(
+            "config system admin\n edit admin\n  set password <STRONG_PASSWORD>\n next\nend",
+            True, "ai_generated_fallback",
+        )},
+    ))
+    assert "AI-GENERATED FALLBACK REMEDIATION" in text.upper()
+    assert "OPERATOR REVIEW REQUIRED" in text.upper()
 
 
 def test_first_audit_trains_and_second_audit_reuses_confirmed_mapping():

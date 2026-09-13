@@ -1,4 +1,4 @@
-"""Hosted-tier auth (security.py, email_service.py, routers/verify.py helpers).
+"""Authentication primitives and session security.
 
 Unit-style like the rest of the suite: pure logic direct, Redis via fakeredis,
 DB-touching helpers via a MagicMock query chain. No live Postgres/Redis/DNS/HTTP.
@@ -123,63 +123,6 @@ class TestSessions:
         assert security.resolve_session(None, r=r) is None
 
 
-# ── Hostname-boundary domain matching ────────────────────────────────────────
-class TestDomainCovers:
-    def test_exact(self):
-        assert security.domain_covers("example.com", "example.com")
-
-    def test_subdomains_authorized(self):
-        assert security.domain_covers("example.com", "api.example.com")
-        assert security.domain_covers("example.com", "a.b.staging.example.com")
-
-    def test_case_and_trailing_dot(self):
-        assert security.domain_covers("Example.com", "API.example.com.")
-
-    def test_rejects_suffix_trick(self):
-        assert not security.domain_covers("example.com", "attackerexample.com")
-
-    def test_rejects_domain_as_prefix_of_other(self):
-        assert not security.domain_covers("example.com", "example.com.attacker.net")
-
-    def test_subdomain_verification_does_not_grant_parent(self):
-        assert not security.domain_covers("api.example.com", "example.com")
-
-    def test_empty_is_false(self):
-        assert not security.domain_covers("", "example.com")
-        assert not security.domain_covers("example.com", "")
-
-
-# ── user_owns_domain (DB via MagicMock; exercises domain_covers integration) ──
-def _mock_db_returning(domains):
-    rows = [SimpleNamespace(domain=d) for d in domains]
-    db = MagicMock()
-    db.query.return_value.filter.return_value.all.return_value = rows
-    db.query.return_value.filter.return_value.first.return_value = rows[0] if rows else None
-    return db
-
-
-class TestUserOwnsDomain:
-    def test_authorized_subdomain(self):
-        from routers.verify import user_owns_domain
-        db = _mock_db_returning(["example.com"])
-        assert user_owns_domain(db, "uid", "shop.example.com")
-
-    def test_unauthorized_domain(self):
-        from routers.verify import user_owns_domain
-        db = _mock_db_returning(["example.com"])
-        assert not user_owns_domain(db, "uid", "evil.net")
-
-    def test_no_verified_rows(self):
-        from routers.verify import user_owns_domain
-        db = _mock_db_returning([])
-        assert not user_owns_domain(db, "uid", "example.com")
-
-    def test_has_verified_domain_true(self):
-        from routers.verify import user_has_verified_domain
-        db = _mock_db_returning(["example.com"])
-        assert user_has_verified_domain(db, "uid")
-
-
 # ── Email backend production gate ────────────────────────────────────────────
 class TestEmailGate:
     def test_console_refused_under_require_auth(self, monkeypatch):
@@ -197,26 +140,6 @@ class TestEmailGate:
         monkeypatch.setattr(settings, "REQUIRE_AUTH", True)
         monkeypatch.setattr(settings, "EMAIL_DEV_CONSOLE_OK", True)
         email_service._send_console("a@b.com", "123456")
-
-
-# ── SSRF / target guardrail (schemas.normalize_domain, reused by verify.py) ──
-class TestSSRFGuardrail:
-    @pytest.mark.parametrize("bad", [
-        "localhost", "sub.localhost",
-        "127.0.0.1", "127.0.0.53",           # IPv4 loopback
-        "::1",                                 # IPv6 loopback
-        "10.0.0.5", "192.168.1.1", "172.16.9.9",  # private v4
-        "169.254.169.254",                     # link-local / cloud metadata
-        "fe80::1",                             # link-local v6
-    ])
-    def test_rejects_internal_targets(self, bad):
-        from schemas import normalize_domain
-        with pytest.raises(ValueError):
-            normalize_domain(bad)
-
-    def test_accepts_public_domain(self):
-        from schemas import normalize_domain
-        assert normalize_domain("Example.COM") == "example.com"
 
 
 # ── Open-source default guarantee ────────────────────────────────────────────

@@ -11,7 +11,7 @@ from config import settings
 # pool_timeout (default 30s) waiting for a free connection, which reads as a
 # mysterious intermittent stall rather than an obvious failure. Scaled off
 # the same knob that actually governs real concurrent load.
-_POOL_SIZE = max(10, settings.MAX_CONCURRENT_SCANS * 4)
+_POOL_SIZE = max(10, settings.MAX_CONCURRENT_AUDITS * 4)
 engine = create_engine(
     settings.DATABASE_URL, pool_pre_ping=True,
     pool_size=_POOL_SIZE, max_overflow=_POOL_SIZE,

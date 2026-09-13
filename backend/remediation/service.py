@@ -4,6 +4,7 @@ from __future__ import annotations
 from analysis.ollama_client import propose_config_remediation
 from remediation.cisco_remediation import Remediation, generate_remediation
 from remediation.juniper_remediation import generate_juniper_remediation
+from remediation.fortios_remediation import generate_fortios_remediation
 
 
 _CISCO_CANONICAL = {
@@ -31,6 +32,8 @@ def deterministic_remediation(vendor: str, reference: str) -> Remediation:
         return generate_remediation(control_id)
     if vendor == "juniper":
         return generate_juniper_remediation(reference)
+    if vendor == "fortinet":
+        return generate_fortios_remediation(reference)
     return Remediation(None, True, "ai_generated_fallback_required")
 
 

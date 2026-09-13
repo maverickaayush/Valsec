@@ -17,11 +17,10 @@ What you expected to happen instead.
 **Environment**
 - Deployment: Docker Compose / native dev
 - OS:
-- Relevant module (if scan-related): recon / webscan / ssl_tls / headers / owasp / tech_fingerprint / nuclei / enumeration
+- Area: normalization / compliance / training / reporting / AI / frontend / deployment
 
 **Logs / evidence**
-Relevant output from `docker compose logs backend worker`, or a scan's
-`module_execution` error, if applicable.
+Relevant output from `docker compose logs backend worker`, or the affected audit status/error, if applicable.
 
 **Additional context**
 Anything else that might help.

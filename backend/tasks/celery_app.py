@@ -15,7 +15,7 @@ from config import settings, validate_startup_security, ensure_secret_key
 ensure_secret_key()
 validate_startup_security()
 
-app = Celery('vapt')
+app = Celery('valsec')
 
 
 @worker_process_init.connect
@@ -30,25 +30,12 @@ app.conf.update(
     task_serializer='json',
     result_serializer='json',
     accept_content=['json'],
-    # Default budget for modules with no per-task override (ssl_tls, headers).
-    # Scaled by SCAN_TIMEOUT_MULTIPLIER - see tasks/base_task.py's scaled_timeout().
-    task_soft_time_limit=round(300 * settings.SCAN_TIMEOUT_MULTIPLIER),
-    task_time_limit=round(360 * settings.SCAN_TIMEOUT_MULTIPLIER),
+    # Default bound for audit orchestration and local inference calls.
+    task_soft_time_limit=round(300 * settings.INFERENCE_TIMEOUT_MULTIPLIER),
+    task_time_limit=round(360 * settings.INFERENCE_TIMEOUT_MULTIPLIER),
     worker_concurrency=5,
     # Dev shortcut: set to True to run tasks synchronously without Redis.
-    # REMOVE before Step 9 / Docker.
     task_always_eager=False,
     broker_connection_retry_on_startup=True,
-    include=[
-        'tasks.recon',
-        'tasks.webscan',
-        'tasks.ssl_tls',
-        'tasks.headers',
-        'tasks.owasp',
-        'tasks.tech_fingerprint',
-        'tasks.nuclei_scan',
-        'tasks.enumeration',
-        'tasks.scan_orchestrator',
-        'tasks.audit_orchestrator',
-    ],
+    include=['tasks.audit_orchestrator'],
 )

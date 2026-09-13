@@ -46,11 +46,11 @@ def _send_smtp(to: str, code: str) -> None:
     if not settings.SMTP_HOST:
         raise EmailConfigError("SMTP_HOST is not configured.")
     msg = EmailMessage()
-    msg["Subject"] = "Your ONUS verification code"
+    msg["Subject"] = "Your Valsec verification code"
     msg["From"] = settings.EMAIL_FROM
     msg["To"] = to
     msg.set_content(
-        f"Your ONUS verification code is {code}.\n\n"
+        f"Your Valsec verification code is {code}.\n\n"
         f"It expires in {settings.OTP_TTL_SECONDS // 60} minutes. "
         f"If you did not request this, you can ignore this email."
     )

@@ -16,6 +16,8 @@ from sqlalchemy import text
 from analysis.ollama_client import propose_config_mappings
 from compliance.engine import ComplianceVerdict as EngineVerdict, evaluate_compliance
 from normalizer.cisco_ios import CiscoIOSNormalizer
+from normalizer.generic import GenericFallbackNormalizer
+from normalizer.fortios import FortiOSNormalizer
 from normalizer.juniper_junos import JuniperJunosNormalizer
 from remediation.service import resolve_remediation
 from tasks.celery_app import app
@@ -87,7 +89,7 @@ def _persist_findings(db, config, normalized, proposals: dict[int, dict] | None 
             },
             raw_source_line=unknown.raw_source_line,
             line_number=unknown.line_number,
-            confidence=ConfidenceTier.unverified,
+            confidence=ConfidenceTier.probable if has_proposal else ConfidenceTier.unverified,
             mapping_source="ai_proposal" if has_proposal else "parser",
         ))
     return bool(normalized.unknown_lines)
@@ -163,10 +165,13 @@ def run_config_audit(config_id: str) -> dict[str, Any]:
         normalizer_type = {
             "cisco": CiscoIOSNormalizer,
             "juniper": JuniperJunosNormalizer,
-        }.get(config.vendor)
+            "fortinet": FortiOSNormalizer,
+        }.get(config.vendor.casefold())
         if normalizer_type is None:
-            raise ValueError(f"Unsupported configuration vendor: {config.vendor}")
-        normalized = normalizer_type(learned_mapping_resolver=resolver).parse(config.raw_config)
+            normalizer = GenericFallbackNormalizer(config.vendor, learned_mapping_resolver=resolver)
+        else:
+            normalizer = normalizer_type(learned_mapping_resolver=resolver)
+        normalized = normalizer.parse(config.raw_config)
         if normalized.config.device_info.os_version:
             config.firmware_version = normalized.config.device_info.os_version
         try:

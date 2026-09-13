@@ -1,6 +1,6 @@
 """Valsec multi-vendor compliance PDF generation.
 
-This renderer is intentionally separate from the legacy web-scanner report.
+It renders the immutable results of a Valsec configuration audit.
 It consumes only deterministic compliance results and remediation metadata.
 """
 from __future__ import annotations

@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from requests.exceptions import ConnectionError
 
 from training.matcher import (
     DatabaseLearnedMappingResolver,
@@ -248,6 +249,171 @@ class TestSharedOllamaConfigClient:
         sent = post.call_args.kwargs["json"]
         assert len(json.loads(sent["messages"][1]["content"])["unknown_lines"]) == 2
 
+    def test_large_unknown_queue_is_split_and_every_line_is_offered(self, monkeypatch):
+        seen = []
+        def post(_endpoint, **kwargs):
+            lines = json.loads(kwargs["json"]["messages"][1]["content"])["unknown_lines"]
+            seen.extend(item["line_number"] for item in lines)
+            response = MagicMock()
+            response.raise_for_status.return_value = None
+            response.json.return_value = {"message": {"content": json.dumps({"proposals": [
+                {"line_number": item["line_number"], "schema_field": "ssh.version", "field_value": 2, "confidence": 0.9}
+                for item in lines
+            ]})}}
+            return response
+        monkeypatch.setattr("analysis.ollama_client.requests.post", post)
+        monkeypatch.setattr(settings, "OLLAMA_URL", "http://127.0.0.1:11434")
+        monkeypatch.setattr(settings, "OLLAMA_MAPPING_BATCH_SIZE", 2)
+        monkeypatch.setattr(settings, "OLLAMA_MAPPING_MAX_CANDIDATES", 100)
+        lines = [{"line_number": number, "raw_source_line": f"ssh generation {number}", "context": None} for number in range(1, 6)]
+        result = propose_config_mappings("vendor", lines, {"ssh.version": "SSH version"})
+        assert seen == [1, 2, 3, 4, 5]
+        assert sorted(result) == seen
+
+    def test_oversized_queue_prioritizes_security_lines_and_leaves_rest_manual(self, monkeypatch):
+        seen = []
+        def post(_endpoint, **kwargs):
+            lines = json.loads(kwargs["json"]["messages"][1]["content"])["unknown_lines"]
+            seen.extend(item["line_number"] for item in lines)
+            response = MagicMock()
+            response.raise_for_status.return_value = None
+            response.json.return_value = {"message": {"content": json.dumps({"proposals": [
+                {"line_number": item["line_number"], "schema_field": None, "field_value": None, "confidence": 0.0}
+                for item in lines
+            ]})}}
+            return response
+        monkeypatch.setattr("analysis.ollama_client.requests.post", post)
+        monkeypatch.setattr(settings, "OLLAMA_URL", "http://127.0.0.1:11434")
+        monkeypatch.setattr(settings, "OLLAMA_MAPPING_BATCH_SIZE", 2)
+        monkeypatch.setattr(settings, "OLLAMA_MAPPING_MAX_CANDIDATES", 2)
+        propose_config_mappings("vendor", [
+            {"line_number": 1, "raw_source_line": "unrelated table row"},
+            {"line_number": 2, "raw_source_line": "SSH_VERSION=2"},
+            {"line_number": 3, "raw_source_line": "SYSLOG=1"},
+        ], {"ssh.version": "SSH version"})
+        assert seen == [2, 3]
+
+    def test_accepts_fenced_json_response(self, monkeypatch):
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"message": {"content": """
+            ```json
+            {"proposals":[{"line_number":4,"schema_field":"ssh.version","field_value":2,"confidence":0.88}]}
+            ```
+        """}}
+        monkeypatch.setattr("analysis.ollama_client.requests.post", MagicMock(return_value=response))
+        monkeypatch.setattr(settings, "OLLAMA_URL", "http://127.0.0.1:11434")
+
+        result = propose_config_mappings(
+            "cisco", [{"line_number": 4, "raw_source_line": "vendor ssh generation 2"}],
+            {"ssh.version": "SSH version"},
+        )
+
+        assert result == {4: {"schema_field": "ssh.version", "field_value": 2, "confidence": 0.88}}
+
+    def test_normalizes_whitespace_and_minor_json_serialization_variations(self, monkeypatch):
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"message": {"content": json.dumps(json.dumps({
+            "proposals": {
+                "line_number": "4", "schema_field": "  ssh.version  ",
+                "field_value": "2", "confidence": "0.90",
+            }
+        }))}}
+        monkeypatch.setattr("analysis.ollama_client.requests.post", MagicMock(return_value=response))
+        monkeypatch.setattr(settings, "OLLAMA_URL", "http://127.0.0.1:11434")
+
+        result = propose_config_mappings(
+            "cisco", [{"line_number": 4, "raw_source_line": "vendor ssh generation 2"}],
+            {"ssh.version": "SSH version"},
+        )
+
+        assert result == {4: {"schema_field": "ssh.version", "field_value": 2, "confidence": 0.9}}
+
+    def test_accepts_bounded_value_type_wrapper_from_local_model(self, monkeypatch):
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"message": {"content": json.dumps({"proposals": [{
+            "line_number": 4, "schema_field": "logging.enabled",
+            "field_value": {"value": False, "type": "boolean"}, "confidence": 0.95,
+        }]})}}
+        monkeypatch.setattr("analysis.ollama_client.requests.post", MagicMock(return_value=response))
+        monkeypatch.setattr(settings, "OLLAMA_URL", "http://127.0.0.1:11434")
+        assert propose_config_mappings(
+            "vendor", [{"line_number": 4, "raw_source_line": "SYSLOG=0"}],
+            {"logging.enabled": "Logging enabled"},
+        ) == {4: {"schema_field": "logging.enabled", "field_value": False, "confidence": 0.95}}
+
+    def test_accepts_single_setting_wrapper_then_enforces_schema_type(self, monkeypatch):
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"message": {"content": json.dumps({"proposals": [{
+            "line_number": 4, "schema_field": "ntp.servers",
+            "field_value": {"NTP_SERVER_HOST1": "clock.example"}, "confidence": 0.9,
+        }]})}}
+        monkeypatch.setattr("analysis.ollama_client.requests.post", MagicMock(return_value=response))
+        monkeypatch.setattr(settings, "OLLAMA_URL", "http://127.0.0.1:11434")
+        assert propose_config_mappings(
+            "vendor", [{"line_number": 4, "raw_source_line": "NTP_SERVER_HOST1=clock.example"}],
+            {"ntp.servers": "NTP server addresses as a list"},
+        )[4]["field_value"] == ["clock.example"]
+
+    def test_rejects_malformed_response(self, monkeypatch):
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"message": {"content": "```json\n{not json}\n```"}}
+        post = MagicMock(return_value=response)
+        monkeypatch.setattr("analysis.ollama_client.requests.post", post)
+        monkeypatch.setattr("analysis.ollama_client.time.sleep", lambda *_: None)
+        monkeypatch.setattr(settings, "OLLAMA_URL", "http://127.0.0.1:11434")
+
+        assert propose_config_mappings(
+            "cisco", [{"line_number": 4, "raw_source_line": "unknown"}],
+            {"ssh.version": "SSH version"},
+        ) == {}
+        assert post.call_count == 3
+
+    def test_rejects_missing_required_proposal_field(self, monkeypatch):
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"message": {"content": json.dumps({"proposals": [{
+            "line_number": 4, "schema_field": "ssh.version", "confidence": 0.9,
+        }]})}}
+        monkeypatch.setattr("analysis.ollama_client.requests.post", MagicMock(return_value=response))
+        monkeypatch.setattr(settings, "OLLAMA_URL", "http://127.0.0.1:11434")
+
+        assert propose_config_mappings(
+            "cisco", [{"line_number": 4, "raw_source_line": "unknown"}],
+            {"ssh.version": "SSH version"},
+        ) == {}
+
+    @pytest.mark.parametrize("confidence", [1.2, -0.1, "high", "NaN", True])
+    def test_rejects_invalid_confidence(self, monkeypatch, confidence):
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"message": {"content": json.dumps({"proposals": [{
+            "line_number": 4, "schema_field": "ssh.version", "field_value": 2,
+            "confidence": confidence,
+        }]})}}
+        monkeypatch.setattr("analysis.ollama_client.requests.post", MagicMock(return_value=response))
+        monkeypatch.setattr(settings, "OLLAMA_URL", "http://127.0.0.1:11434")
+
+        assert propose_config_mappings(
+            "cisco", [{"line_number": 4, "raw_source_line": "unknown"}],
+            {"ssh.version": "SSH version"},
+        ) == {}
+
+    def test_ollama_unavailable_returns_manual_training_fallback(self, monkeypatch):
+        monkeypatch.setattr(
+            "analysis.ollama_client.requests.post", MagicMock(side_effect=ConnectionError("offline")),
+        )
+        monkeypatch.setattr(settings, "OLLAMA_URL", "http://127.0.0.1:11434")
+
+        assert propose_config_mappings(
+            "cisco", [{"line_number": 4, "raw_source_line": "unknown"}],
+            {"ssh.version": "SSH version"},
+        ) == {}
+
     def test_refuses_non_local_ollama_endpoint(self, monkeypatch):
         post = MagicMock()
         monkeypatch.setattr("analysis.ollama_client.requests.post", post)
@@ -277,9 +443,36 @@ class TestSharedOllamaConfigClient:
         assert propose_config_remediation(**kwargs) == "configure terminal\nno service legacy\nend"
 
         response.json.return_value = {
-            "message": {"content": json.dumps({"cli_commands": ["write erase", "reload"]})}
+            "message": {"content": json.dumps({"cli_commands": [
+                "config system admin", "edit admin", "set password <STRONG_PASSWORD>", "next", "end"
+            ]})}
+        }
+        assert propose_config_remediation(**{
+            **kwargs, "vendor": "fortinet", "os_type": "fortios",
+        }) == "config system admin\nedit admin\nset password <STRONG_PASSWORD>\nnext\nend"
+
+        response.json.return_value = {
+            "message": {"content": json.dumps({"cli_commands": [
+                "config system admin user admin set password-protected on", "end"
+            ]})}
         }
         monkeypatch.setattr("analysis.ollama_client.time.sleep", lambda *_: None)
+        assert propose_config_remediation(**{
+            **kwargs, "vendor": "fortinet", "os_type": "fortios",
+        }) is None
+
+        response.json.return_value = {
+            "message": {"content": json.dumps({"cli_commands": [
+                "config system admin", "set password InventedSecret123!", "next", "end"
+            ]})}
+        }
+        assert propose_config_remediation(**{
+            **kwargs, "vendor": "fortinet", "os_type": "fortios",
+        }) is None
+
+        response.json.return_value = {
+            "message": {"content": json.dumps({"cli_commands": ["write erase", "reload"]})}
+        }
         assert propose_config_remediation(**kwargs) is None
 
         response.json.return_value = {
@@ -289,6 +482,22 @@ class TestSharedOllamaConfigClient:
         }
         assert propose_config_remediation(**kwargs) is None
 
+    def test_remediation_accepts_fenced_json_and_multiline_command_value(self, monkeypatch):
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        command_block = "config system admin\nedit admin\nset password <STRONG_PASSWORD>\nnext\nend"
+        response.json.return_value = {"message": {"content": (
+            "```json\n" + json.dumps({"cli_commands": command_block}) + "\n```"
+        )}}
+        monkeypatch.setattr("analysis.ollama_client.requests.post", MagicMock(return_value=response))
+        monkeypatch.setattr(settings, "OLLAMA_URL", "http://127.0.0.1:11434")
+
+        result = propose_config_remediation(
+            vendor="fortinet", os_type="fortios", framework="NIST SP 800-53 Rev. 5",
+            control_id="IA-5", title="Protect credentials", observed_detail="Password is not encrypted",
+        )
+
+        assert result == "config system admin\nedit admin\nset password <STRONG_PASSWORD>\nnext\nend"
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
