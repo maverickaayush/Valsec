@@ -1,10 +1,17 @@
-# Valsec — AI-Driven Multi-Vendor Network Security Compliance Auditor
+# Valsec - AI-Driven Multi-Vendor Network Security Compliance Auditor
 
 Valsec is a local-first, AI-driven multi-vendor network security compliance auditor for controlled institutional and enterprise networks. It normalizes Cisco IOS/IOS-XE, Juniper JunOS, and Fortinet FortiOS configurations into one vendor-neutral schema, evaluates deterministic framework rules, generates reviewable vendor CLI remediation, and produces a Valsec PDF report.
 
 Valsec supports routers, switches, and firewalls through Cisco, Juniper, and Fortinet adapters. An unsupported vendor can be onboarded without a parser: Valsec preserves its vendor identifier, proposes schema mappings with local Ollama, requires operator approval, and reuses approved mappings only for the same user and vendor.
 
+![Schema Training](docs/images/schema-training.png)
+
+
 AI can propose schema mappings and remediation text. It cannot determine PASS, FAIL, N/A, severity, or score.
+
+
+
+![Valsec Overview](docs/images/valsec-overview.png)
 
 ## Capabilities
 
@@ -22,9 +29,15 @@ AI can propose schema mappings and remediation text. It cannot determine PASS, F
 - Operator-approved remediation push with Cisco running-config-only application, Junos confirmed commits, post-change re-pull, and a visible configuration diff.
 - Persistent breadth-first discovery sessions using CDP/LLDP where present and kernel neighbor/ARP evidence as a passive fallback. Eligible advertised neighbors can be processed automatically; evidence-only candidates pause for their missing fixed profile and credentials before entering the existing audit pipeline.
 - Durable device registry with audit history, baseline selection, deterministic control/raw-config drift, and latest-audit fleet summaries.
+
+![Fleet Compliance](docs/images/fleet-compliance.png)
+
 - Process liveness and dependency readiness endpoints, configurable Celery concurrency, and healthchecked Compose services.
 - Opt-in Fernet-encrypted device credentials for manual SSH pulls, with owner scoping and append-only access events. The vault is disabled by default.
 - Organization-scoped Network Missions that connect a registered seed to bounded authenticated CDP/LLDP discovery, stored-credential collection, the existing deterministic audit lifecycle, grouped fleet findings, and explicitly approved per-device remediation.
+
+![Network Mission](docs/images/network-mission.png)
+
 
 The non-CIS catalogues are representative technical control mappings for a demonstration. They are not full certification or accreditation coverage.
 
@@ -43,36 +56,36 @@ For any exposed or authenticated deployment, replace `POSTGRES_PASSWORD` and `SE
 
 ## API
 
-- `POST /api/configs/upload` — raw text, one file, multiple files, or ZIP; accepts framework, fallback vendor, and optional per-file vendor hints.
-- `GET /api/configs` — fleet/audit list.
-- `GET /api/configs/{id}/status` — lifecycle and pending review count.
-- `GET /api/configs/{id}/results` — deterministic compliance results and remediation.
-- `GET /api/configs/{id}/report` — authorized PDF download.
-- `GET /api/configs/{id}/unverified` — unverified/probable lines and any validated AI proposal.
-- `POST /api/configs/{id}/train` — approve a mapping and resume once all findings are confirmed.
-- `POST /api/configs/pull-device` — fetch a LAN device configuration over SSH and queue it through the same audit pipeline as an upload.
-- `POST /api/configs/discover-neighbors` — authenticate to a seed and return LLDP/kernel-neighbor evidence without scanning the subnet.
-- `POST /api/configs/pull-discovered-device` — revalidate a selected discovered address, pull through a fixed SSH or Cirotech Telnet profile, and queue the existing audit.
-- `POST /api/configs/discovery-sessions` — persist a bounded BFS session and automatically process eligible advertised neighbors.
-- `GET /api/configs/discovery-sessions/{id}` — return discovered devices, linked Config IDs, and live audit states.
-- `POST /api/configs/discovery-sessions/{id}/devices/{device_id}/process` — supply a passive candidate's missing fixed profile/credentials, then reuse normal pull/audit ingestion.
-- `POST /api/configs/discovery-sessions/{id}/devices/{device_id}/skip` — mark passive host evidence as not a router for this session.
-- `POST /api/configs/{id}/findings/{finding_id}/approve-remediation` — freeze the existing remediation text after operator review.
-- `POST /api/configs/{id}/findings/{finding_id}/apply-remediation` — apply only that approved text and return before/after snapshots and a unified diff.
-- `GET /api/devices` and `GET/PATCH /api/devices/{id}` — paginated owned inventory, current score, metadata, and decommissioning.
-- `GET /api/devices/{id}/history` — every linked configuration audit without deleting decommissioned-device history.
-- `POST /api/devices/{id}/baseline` and `GET /api/devices/{id}/drift` — completed-audit baseline selection and deterministic drift.
-- `GET /api/fleet/summary` — active-device status, latest-completed score distribution, failing controls, and stale devices.
-- `GET /health` and `GET /ready` — process liveness and bounded DB/Redis/Ollama dependency checks.
-- `POST/GET /api/devices/{id}/credentials` and `DELETE /api/devices/{id}/credentials/{credential_id}` — opt-in credential storage, metadata listing, and revocation; plaintext is never returned.
-- `POST/GET /api/devices/{id}/schedules` and `PATCH/DELETE /api/devices/{id}/schedules/{schedule_id}` — fixed-interval recurring audits using stored credentials.
-- `GET /api/organizations/{org_id}/schedules` — owner/operator organization-wide schedule view.
-- `PATCH /api/organizations/{org_id}/remediation-policy` — owner-only control for requiring a different campaign approver.
-- `POST/GET /api/network-missions` and `GET /api/network-missions/{id}` — create, list, and inspect bounded seed-to-fleet operations.
-- `POST /api/network-missions/{id}/start` — queue authenticated discovery and stored-credential collection; task messages contain IDs, never device secrets.
-- `GET /api/network-missions/{id}/devices|findings|summary` — inspect topology evidence, eligibility reasons, linked audits, grouped failures, and posture.
-- `POST/GET /api/network-missions/{id}/remediation-campaigns` — group one deterministic control remediation into vendor-aware per-device targets.
-- `POST /api/remediation-campaigns/{id}/approve|execute` and `GET .../results` — explicit owner approval followed by independently verified device jobs.
+- `POST /api/configs/upload`: raw text, one file, multiple files, or ZIP; accepts framework, fallback vendor, and optional per-file vendor hints.
+- `GET /api/configs`: fleet/audit list.
+- `GET /api/configs/{id}/status`: lifecycle and pending review count.
+- `GET /api/configs/{id}/results`: deterministic compliance results and remediation.
+- `GET /api/configs/{id}/report`: authorized PDF download.
+- `GET /api/configs/{id}/unverified`: unverified/probable lines and any validated AI proposal.
+- `POST /api/configs/{id}/train`: approve a mapping and resume once all findings are confirmed.
+- `POST /api/configs/pull-device`: fetch a LAN device configuration over SSH and queue it through the same audit pipeline as an upload.
+- `POST /api/configs/discover-neighbors`: authenticate to a seed and return LLDP/kernel-neighbor evidence without scanning the subnet.
+- `POST /api/configs/pull-discovered-device`: revalidate a selected discovered address, pull through a fixed SSH or Cirotech Telnet profile, and queue the existing audit.
+- `POST /api/configs/discovery-sessions`: persist a bounded BFS session and automatically process eligible advertised neighbors.
+- `GET /api/configs/discovery-sessions/{id}`: return discovered devices, linked Config IDs, and live audit states.
+- `POST /api/configs/discovery-sessions/{id}/devices/{device_id}/process`: supply a passive candidate's missing fixed profile/credentials, then reuse normal pull/audit ingestion.
+- `POST /api/configs/discovery-sessions/{id}/devices/{device_id}/skip`: mark passive host evidence as not a router for this session.
+- `POST /api/configs/{id}/findings/{finding_id}/approve-remediation`: freeze the existing remediation text after operator review.
+- `POST /api/configs/{id}/findings/{finding_id}/apply-remediation`: apply only that approved text and return before/after snapshots and a unified diff.
+- `GET /api/devices` and `GET/PATCH /api/devices/{id}`: paginated owned inventory, current score, metadata, and decommissioning.
+- `GET /api/devices/{id}/history`: every linked configuration audit without deleting decommissioned-device history.
+- `POST /api/devices/{id}/baseline` and `GET /api/devices/{id}/drift`: completed-audit baseline selection and deterministic drift.
+- `GET /api/fleet/summary`: active-device status, latest-completed score distribution, failing controls, and stale devices.
+- `GET /health` and `GET /ready`: process liveness and bounded DB/Redis/Ollama dependency checks.
+- `POST/GET /api/devices/{id}/credentials` and `DELETE /api/devices/{id}/credentials/{credential_id}`: opt-in credential storage, metadata listing, and revocation; plaintext is never returned.
+- `POST/GET /api/devices/{id}/schedules` and `PATCH/DELETE /api/devices/{id}/schedules/{schedule_id}`: fixed-interval recurring audits using stored credentials.
+- `GET /api/organizations/{org_id}/schedules`: owner/operator organization-wide schedule view.
+- `PATCH /api/organizations/{org_id}/remediation-policy`: owner-only control for requiring a different campaign approver.
+- `POST/GET /api/network-missions` and `GET /api/network-missions/{id}`: create, list, and inspect bounded seed-to-fleet operations.
+- `POST /api/network-missions/{id}/start`: queue authenticated discovery and stored-credential collection; task messages contain IDs, never device secrets.
+- `GET /api/network-missions/{id}/devices|findings|summary`: inspect topology evidence, eligibility reasons, linked audits, grouped failures, and posture.
+- `POST/GET /api/network-missions/{id}/remediation-campaigns`: group one deterministic control remediation into vendor-aware per-device targets.
+- `POST /api/remediation-campaigns/{id}/approve|execute` and `GET .../results`: explicit owner approval followed by independently verified device jobs.
 
 Request-supplied device credentials remain request-only and are never stored. Under `REQUIRE_AUTH=true`, pull and discovery require the authenticated device owner; remediation approval and PUSH remain local-only. Cisco push changes running configuration only; startup persistence remains a separate manual action. Junos uses `commit confirmed 5`, verifies reachability, then commits permanently. Risky generic/UCI changes are always refused because no automatic rollback is available.
 
