@@ -19,7 +19,7 @@ import {
   type DiscoverySessionResponse, type UnverifiedLine,
 } from '@/lib/valsec-api'
 
-export type ValsecView = 'overview' | 'upload' | 'audits' | 'status' | 'training' | 'report' | 'frameworks'
+export type ValsecView = 'overview' | 'upload' | 'audits' | 'status' | 'training' | 'report' | 'frameworks' | 'devices' | 'missions'
 
 const SCHEMA_FIELDS = [
   'device_info.hostname', 'device_info.domain_name', 'device_info.os_version',
@@ -145,6 +145,8 @@ const routeFor = (view: ValsecView, id?: string) => {
   if (view === 'training') return id ? `/configs/${id}/training` : '/training'
   if (view === 'status') return id ? `/configs/${id}/status` : '/configs'
   if (view === 'report') return id ? `/configs/${id}/report` : '/configs'
+  if (view === 'devices') return '/devices'
+  if (view === 'missions') return '/network-missions'
   return '/frameworks'
 }
 
@@ -182,6 +184,9 @@ function Sidebar({ view, trainingCount, navigate }: { view: ValsecView; training
       ['Overview', 'overview', LayoutDashboard], ['Upload Config', 'upload', CloudUpload],
       ['Fleet Audits', 'audits', ListFilter], ['Training Queue', 'training', BookOpen],
     ] as const },
+    { label: 'FLEET', items: [
+      ['Devices', 'devices', Activity], ['Network Missions', 'missions', Network],
+    ] as const },
     { label: 'KNOWLEDGE', items: [['Frameworks', 'frameworks', ShieldCheck]] as const },
   ]
   return <aside className="sidebar">
@@ -192,7 +197,7 @@ function Sidebar({ view, trainingCount, navigate }: { view: ValsecView; training
 }
 
 function Topbar({ view, onCommand }: { view: ValsecView; onCommand: () => void }) {
-  const titles: Record<ValsecView, string> = { overview: 'Compliance Command Center', upload: 'Upload Configuration', audits: 'Fleet Audits', status: 'Audit Progress', training: 'Training Queue', report: 'Compliance Report', frameworks: 'Compliance Frameworks' }
+  const titles: Record<ValsecView, string> = { overview: 'Compliance Command Center', upload: 'Upload Configuration', audits: 'Fleet Audits', status: 'Audit Progress', training: 'Training Queue', report: 'Compliance Report', frameworks: 'Compliance Frameworks', devices: 'Managed Devices', missions: 'Network Missions' }
   return <header className="topbar"><div className="crumb"><span>Valsec</span><ChevronRight /><b>{titles[view]}</b></div><div className="top-actions"><button className="command-button" onClick={onCommand}><Command /><span>Command palette</span><kbd>Ctrl K</kbd></button><button className="icon-button" aria-label="Notifications"><Bell /></button><button className="icon-button" aria-label="Help"><CircleHelp /></button></div></header>
 }
 
@@ -399,7 +404,7 @@ function FrameworksView() {
 }
 
 function CommandPalette({ close, navigate }: { close: () => void; navigate: (view: ValsecView, id?: string) => void }) {
-  const commands = [['Go to overview','overview',LayoutDashboard],['Upload configuration','upload',CloudUpload],['Open training queue','training',BookOpen],['View fleet audits','audits',ListFilter],['Compliance frameworks','frameworks',ShieldCheck]] as const
+  const commands = [['Go to overview','overview',LayoutDashboard],['Open device registry','devices',Activity],['Open network missions','missions',Network],['Upload configuration','upload',CloudUpload],['Open training queue','training',BookOpen],['View fleet audits','audits',ListFilter],['Compliance frameworks','frameworks',ShieldCheck]] as const
   return <div className="overlay" onClick={close}><div className="palette" onClick={event => event.stopPropagation()}><div className="palette-input"><Search /><input autoFocus placeholder="Navigate Valsec..." /><button className="icon-button" aria-label="Close" onClick={close}><X /></button></div>{commands.map(([label, target, Icon]) => <button key={label} onClick={() => { navigate(target); close() }}><Icon /><span>{label}</span><ChevronRight /></button>)}</div></div>
 }
 

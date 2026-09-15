@@ -3,6 +3,7 @@
 import Link from 'next/link'
 import { useCallback, useEffect, useState } from 'react'
 import { DeviceInventoryItem, FleetSummary, getDevices, getFleetSummary } from '@/lib/valsec-api'
+import { ProductNav } from '@/components/product-nav'
 
 function date(value: string | null) {
   return value ? new Date(value).toLocaleString() : 'Never'
@@ -27,6 +28,7 @@ export function DeviceFleet() {
     ? Object.values(summary.devices_by_status).reduce((total, count) => total + count, 0)
     : devices.length
   return <main className="device-page">
+    <ProductNav active="devices" />
     <header className="device-page-header"><div><span>FLEET / DEVICE REGISTRY</span><h1>Managed Devices</h1><p>Durable inventory with latest deterministic audit state.</p></div><button onClick={() => void load()}>Refresh</button></header>
     {error && <div className="device-error">{error}</div>}
     <section className="device-summary">

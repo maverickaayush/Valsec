@@ -20,8 +20,11 @@ class MemberCreate(BaseModel):
     role: MembershipRole
 
 
-@router.post("/api/organizations/{org_id}/members", status_code=201)
-def add_member(org_id: UUID, body: MemberCreate, request: Request, db: Session = Depends(get_db)):
+class OrganizationPolicyUpdate(BaseModel):
+    require_separate_remediation_approver: bool
+
+
+def _owned_organization(org_id: UUID, request: Request, db: Session):
     if not settings.REQUIRE_AUTH:
         raise HTTPException(status_code=404, detail="Not found")
     actor = _current_user(request, db)
@@ -31,6 +34,12 @@ def add_member(org_id: UUID, body: MemberCreate, request: Request, db: Session =
     if organization is None:
         raise HTTPException(status_code=404, detail="Organization not found")
     require_org_role(db, actor, org_id, OWNER_ROLES)
+    return organization, actor
+
+
+@router.post("/api/organizations/{org_id}/members", status_code=201)
+def add_member(org_id: UUID, body: MemberCreate, request: Request, db: Session = Depends(get_db)):
+    organization, actor = _owned_organization(org_id, request, db)
     target = db.query(User).filter(User.id == body.user_id).first()
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
@@ -46,3 +55,23 @@ def add_member(org_id: UUID, body: MemberCreate, request: Request, db: Session =
         raise HTTPException(status_code=409, detail="User is already a member") from exc
     db.refresh(membership)
     return {"id": membership.id, "organization_id": org_id, "user_id": target.id, "role": membership.role}
+
+
+@router.patch("/api/organizations/{org_id}/remediation-policy")
+def update_remediation_policy(
+    org_id: UUID,
+    body: OrganizationPolicyUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    organization, _ = _owned_organization(org_id, request, db)
+    organization.require_separate_remediation_approver = (
+        body.require_separate_remediation_approver
+    )
+    db.commit()
+    return {
+        "organization_id": organization.id,
+        "require_separate_remediation_approver": (
+            organization.require_separate_remediation_approver
+        ),
+    }

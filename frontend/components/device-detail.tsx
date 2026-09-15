@@ -6,6 +6,7 @@ import {
   DeviceHistoryResponse, DeviceInventoryItem, DriftReport,
   getDevice, getDeviceDrift, getDeviceHistory, setDeviceBaseline,
 } from '@/lib/valsec-api'
+import { ProductNav } from '@/components/product-nav'
 
 function date(value: string | null) { return value ? new Date(value).toLocaleString() : 'Pending' }
 
@@ -26,6 +27,7 @@ export function DeviceDetail({ deviceId }: { deviceId: string }) {
   useEffect(() => { void load() }, [load])
   const baseline = async (configId: string) => { await setDeviceBaseline(deviceId, configId); await load() }
   return <main className="device-page">
+    <ProductNav active="devices" />
     <header className="device-page-header"><div><Link href="/devices">← Device fleet</Link><h1>{device?.display_name ?? 'Device'}</h1><p>{device ? `${device.vendor} · ${device.os_type} · ${device.management_address ?? 'upload identity'}` : 'Loading…'}</p></div></header>
     {error && <div className="device-error">{error}</div>}
     {device && <section className="device-summary"><article><span>CURRENT SCORE</span><strong>{device.compliance_score == null ? '—' : `${device.compliance_score.toFixed(1)}%`}</strong></article><article><span>STATUS</span><strong>{device.status ?? 'No audit'}</strong></article><article><span>SITE</span><strong>{device.site ?? '—'}</strong></article><article><span>ACTIVE</span><strong>{device.is_active ? 'Yes' : 'No'}</strong></article></section>}

@@ -219,10 +219,17 @@ def _commands_for_vendor(seed_vendor: str) -> tuple[tuple[str, str], ...]:
     return _LINUX_DISCOVERY_COMMANDS
 
 
-def discover_seed_neighbors(host: str, port: int, username: str, password: str, timeout: float = 8.0, seed_vendor: str = "auto") -> list[NeighborCandidate]:
+def discover_seed_neighbors(
+    host: str, port: int, username: str, password: str,
+    timeout: float = 8.0, seed_vendor: str = "auto",
+    allowed_networks: list[str] | tuple[str, ...] | None = None,
+) -> list[NeighborCandidate]:
     """Authenticate to a seed and execute only the fixed discovery commands."""
     try:
-        pinned_ip = assert_connectable_target(host)
+        pinned_ip = (
+            assert_connectable_target(host, allowed_networks)
+            if allowed_networks is not None else assert_connectable_target(host)
+        )
     except TargetResolutionError as exc:
         raise DeviceUnreachableError(str(exc)) from exc
     client = paramiko.SSHClient()

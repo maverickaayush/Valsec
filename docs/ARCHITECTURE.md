@@ -47,9 +47,8 @@ ingestion transaction. Uploads resolve by exact vendor and display name when no
 address exists. Direct and discovered pulls resolve by exact vendor and the
 already validated, pinned management address. PostgreSQL advisory transaction
 locks and indexed lookups serialize address-based create-or-match without a
-table scan. Authenticated deployments place the current user UUID in the
-nullable organization placeholder; device endpoints apply the same hidden-404
-ownership pattern as configuration endpoints.
+table scan. Authenticated deployments link devices to real Organizations;
+Membership roles apply the same hidden-404 isolation pattern as device APIs.
 
 The audit worker updates `first_seen_at` and `last_audited_at` only when its
 existing lifecycle reaches `complete`. Decommissioning changes `is_active` but
@@ -71,23 +70,72 @@ details. Celery worker concurrency is sourced from `MAX_CONCURRENT_AUDITS`,
 which also documents the database-pool sizing relationship. Compose defines
 health checks for PostgreSQL, Redis, backend, worker, and frontend.
 
-## Opt-in credential vault (P1-1)
+## Opt-in credential vault
 
 The vault is dark by default behind `ENABLE_CREDENTIAL_VAULT`. Its local backend
 derives a Fernet key from the dedicated `CREDENTIAL_VAULT_KEY`; the session and
 CSRF `SECRET_KEY` is never reused. PostgreSQL stores only the encrypted opaque
 reference plus non-secret username/type metadata. API responses never contain
-the reference or decrypted secret. Successful stored-credential pulls append a
-`CredentialAccessLog` event after the connector returns, and logging failure is
-warned without turning an otherwise successful device pull into a failure.
+the reference or decrypted secret. Each successful server-side retrieval appends
+a `CredentialAccessLog` event; logging failure is warned without turning an
+otherwise successful device operation into a failure.
 
-P1-1 reuses `Device.org_id` as the already-live user UUID ownership boundary.
-An unowned device is claimed by its first authenticated network/vault accessor;
-another user receives `403` before a connector or secret backend is reached.
-This is explicitly a stopgap pending P1-3 Organizations/Roles and must not be
-extended as a general permissions model. Local `REQUIRE_AUTH=false` calls bypass
-the ownership helpers and retain request-supplied credentials unchanged.
+`Device.org_id` is a real Organization foreign key. An unowned
+device is claimed into the authenticated user's personal Organization, and
+owner/operator/viewer memberships define access. Local `REQUIRE_AUTH=false`
+calls bypass memberships and retain request-supplied credentials unchanged.
 
-Only direct manual SSH pull can retrieve a stored credential in P1-1. Discovery
-continues to accept request-scoped credentials, scheduling does not exist, and
-remediation approval/PUSH retains its existing local-only policy.
+Organizations carry an opt-in `require_separate_remediation_approver` policy.
+The compatible default permits an owner to approve their own campaign. When an
+owner enables dual control, a different owner must approve; operators can still
+propose and execute already-approved campaigns, and viewers remain read-only.
+
+Direct pulls, recurring audits, and Network Missions retrieve stored credentials
+through the same server-only service. Legacy discovery continues to accept
+request-scoped credentials for compatibility, and the legacy remediation
+approval/PUSH endpoint retains its local-only policy.
+
+## Network Mission orchestration
+
+`NetworkMission` is the trace root for a bounded operation. A
+`NetworkMissionDevice` records the seed or one authenticated-neighbor evidence
+node, eligibility state, Device identity, and linked Config. Append-only
+`NetworkMissionEvent` rows record sanitized transitions. A
+`RemediationCampaign` groups one framework/control, while each
+`RemediationCampaignTarget` preserves the individual finding, vendor-specific
+immutable `RemediationAction`, and final device outcome.
+
+The mission worker performs a bounded BFS on the `network_missions` queue. It
+does not iterate over an IP range. Only a CDP/LLDP candidate with an established
+supported vendor can become a Device automatically; passive ARP candidates are
+persisted as identity-unverified. Cycles are deduplicated by pinned address and
+both depth and count are capped. A candidate must also pass the central target
+guard, requested mission CIDRs, optional deployment-wide
+`AUTHORIZED_NETWORKS`, organization isolation, connector support, and an exact
+device-bound credential lookup.
+
+Eligible nodes call `pull_with_stored_credential()`, which calls the existing
+connector and `persist_and_dispatch_configs()` path. Mission audits therefore
+produce ordinary Config, NormalizedFinding, ComplianceResult, and Report rows.
+Fleet summaries are views over those persisted rows. The mission layer does not
+change normalization or verdict logic and makes no AI call of its own.
+
+Campaign creation accepts only persisted deterministic remediation text; AI
+fallback text is excluded. Owner approval creates/reuses the same immutable
+per-finding `RemediationAction` used by manual push. Execution remains one
+target per task and calls the existing snapshot/apply/re-read/diff connector.
+Terminal targets distinguish verified, already-compliant, failed, unreachable,
+and rolled-back outcomes, allowing aggregate partial completion without a
+broadcast command. A verified post-change snapshot becomes an ordinary Config,
+is audited by the existing worker, and is linked as the target's verification
+Config; final posture uses those completed deterministic results.
+
+Task arguments are UUIDs only. Credential plaintext is retrieved within a
+worker and discarded after one connector operation. Credential access is
+linked to the mission. Run default, `scheduled_audits`, and `network_missions`
+workers separately; set mission worker concurrency from
+`MISSION_MAX_CONCURRENT_OPERATIONS` (default 5). Approved per-device changes and
+campaign finalization run on the separate `remediation` queue, bounded by
+`REMEDIATION_MAX_CONCURRENT_OPERATIONS` (default 3), so fleet activity cannot
+occupy interactive worker slots and configuration mutation cannot starve
+discovery orchestration.

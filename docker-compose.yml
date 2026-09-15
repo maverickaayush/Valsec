@@ -42,6 +42,15 @@ services:
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       ENABLE_CREDENTIAL_VAULT: ${ENABLE_CREDENTIAL_VAULT:-false}
       CREDENTIAL_VAULT_KEY: ${CREDENTIAL_VAULT_KEY:-}
+      SCHEDULE_POLL_SECONDS: ${SCHEDULE_POLL_SECONDS:-60}
+      SCHEDULE_FAILURE_THRESHOLD: ${SCHEDULE_FAILURE_THRESHOLD:-3}
+      SCHEDULE_MAX_RETRIES: ${SCHEDULE_MAX_RETRIES:-3}
+      SCHEDULE_RETRY_BACKOFF_SECONDS: ${SCHEDULE_RETRY_BACKOFF_SECONDS:-60}
+      AUTHORIZED_NETWORKS: ${AUTHORIZED_NETWORKS:-}
+      MISSION_MAX_CONCURRENT_OPERATIONS: ${MISSION_MAX_CONCURRENT_OPERATIONS:-5}
+      REMEDIATION_MAX_CONCURRENT_OPERATIONS: ${REMEDIATION_MAX_CONCURRENT_OPERATIONS:-3}
+      MISSION_AUDIT_POLL_SECONDS: ${MISSION_AUDIT_POLL_SECONDS:-5}
+      MISSION_AUDIT_POLL_LIMIT: ${MISSION_AUDIT_POLL_LIMIT:-120}
       SECRET_KEY: ${SECRET_KEY:-change_me_in_production}
       VALSEC_ENV: ${VALSEC_ENV:-development}
     extra_hosts:
@@ -69,13 +78,22 @@ services:
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       ENABLE_CREDENTIAL_VAULT: ${ENABLE_CREDENTIAL_VAULT:-false}
       CREDENTIAL_VAULT_KEY: ${CREDENTIAL_VAULT_KEY:-}
+      SCHEDULE_POLL_SECONDS: ${SCHEDULE_POLL_SECONDS:-60}
+      SCHEDULE_FAILURE_THRESHOLD: ${SCHEDULE_FAILURE_THRESHOLD:-3}
+      SCHEDULE_MAX_RETRIES: ${SCHEDULE_MAX_RETRIES:-3}
+      SCHEDULE_RETRY_BACKOFF_SECONDS: ${SCHEDULE_RETRY_BACKOFF_SECONDS:-60}
+      AUTHORIZED_NETWORKS: ${AUTHORIZED_NETWORKS:-}
+      MISSION_MAX_CONCURRENT_OPERATIONS: ${MISSION_MAX_CONCURRENT_OPERATIONS:-5}
+      REMEDIATION_MAX_CONCURRENT_OPERATIONS: ${REMEDIATION_MAX_CONCURRENT_OPERATIONS:-3}
+      MISSION_AUDIT_POLL_SECONDS: ${MISSION_AUDIT_POLL_SECONDS:-5}
+      MISSION_AUDIT_POLL_LIMIT: ${MISSION_AUDIT_POLL_LIMIT:-120}
       SECRET_KEY: ${SECRET_KEY:-change_me_in_production}
       VALSEC_ENV: ${VALSEC_ENV:-development}
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    command: celery -A tasks.celery_app worker --loglevel=info
+    command: celery -A tasks.celery_app worker --loglevel=info -Q celery,scheduled_audits,network_missions,remediation -B
     healthcheck:
-      test: ["CMD-SHELL", "celery -A tasks.celery_app inspect ping -d celery@$$HOSTNAME --timeout=5 | grep -q pong"]
+      test: ["CMD-SHELL", "celery -A tasks.celery_app inspect ping --timeout=5 | grep -q pong"]
       interval: 15s
       timeout: 10s
       retries: 10

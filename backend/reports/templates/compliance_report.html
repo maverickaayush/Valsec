@@ -60,6 +60,10 @@
       <div><span>Vendor</span><b>{{ vendor }}</b></div>
       <div><span>Operating system</span><b>{{ os_type }}</b></div>
       <div><span>Firmware</span><b>{{ firmware_version }}</b></div>
+      {% if management_address %}<div><span>Management address</span><b>{{ management_address }}</b></div>{% endif %}
+      {% if model %}<div><span>Model</span><b>{{ model }}</b></div>{% endif %}
+      {% if serial_number %}<div><span>Serial number</span><b>{{ serial_number }}</b></div>{% endif %}
+      {% if organization_name %}<div><span>Organization</span><b>{{ organization_name }}</b></div>{% endif %}
       <div><span>Completed</span><b>{{ completed_at }}</b></div>
       <div><span>Benchmark</span><b>{{ framework }}</b></div>
       <div><span>Benchmark version</span><b>{{ framework_version }}</b></div>

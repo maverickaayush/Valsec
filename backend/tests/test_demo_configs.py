@@ -1,4 +1,4 @@
-"""Regression checks for the three judge-demo Cisco configurations."""
+"""Regression checks for the representative Cisco configurations."""
 from pathlib import Path
 from unittest.mock import MagicMock
 

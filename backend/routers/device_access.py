@@ -12,7 +12,6 @@ from sqlalchemy.orm import Session
 from compliance.catalogues import FRAMEWORKS
 from config import settings
 from connectors.neighbor_discovery import discover_seed_neighbors
-from connectors.risk_classifier import classify_risk
 from connectors.ssh_pull import DeviceAuthError, DeviceUnreachableError, fetch_device_config
 from connectors.telnet_pull import fetch_cirotech_config
 from connectors.ssh_push import (
@@ -31,12 +30,16 @@ from device_ownership import (
 from organization_access import OPERATE_ROLES, require_org_role
 from device_registry import link_if_database_session
 from models import (
-    ComplianceResult, Config, ConfigStatus, CredentialAccessLog,
-    DeviceCredential, DiscoverySession,
+    ComplianceResult, Config, ConfigStatus, DeviceCredential,
+    DiscoverySession,
     DiscoverySessionStatus, DiscoveredDevice, DiscoveredDeviceStatus,
     RemediationAction, RemediationActionStatus,
 )
-from secrets import get_secret_backend
+from credential_service import record_credential_access, retrieve_stored_credential
+from device_pull_service import pull_with_stored_credential, validate_pull_framework
+from remediation.execution import (
+    approve_finding_action, execute_approved_action, mark_action_failed,
+)
 from routers.configs import (
     _DEFAULT_GENERIC_FRAMEWORK, _VENDOR_OS_TYPES, _validated_vendor,
     get_owned_config_or_404, persist_and_dispatch_configs,
@@ -62,38 +65,11 @@ def _commit_claim(db, claimed: bool) -> None:
 
 
 def _stored_ssh_credential(db, device):
-    credential = db.query(DeviceCredential).filter(
-        DeviceCredential.device_id == device.id,
-        DeviceCredential.credential_type == "ssh",
-    ).first()
-    if credential is None:
-        raise HTTPException(status_code=404, detail="Stored SSH credential not found")
-    try:
-        plaintext = get_secret_backend(credential.secret_backend).retrieve(credential.secret_ref)
-    except Exception:
-        raise HTTPException(status_code=503, detail="Credential vault is unavailable") from None
-    return credential.username, plaintext, credential
+    return retrieve_stored_credential(db, device, credential_type="ssh")
 
 
 def _record_credential_access(db, credential, user, *, purpose: str) -> None:
-    """Best-effort audit write after a successful connector call."""
-    try:
-        credential.last_used_at = datetime.utcnow()
-        db.add(CredentialAccessLog(
-            credential_id=credential.id,
-            accessed_by_user_id=user.id if user is not None else None,
-            purpose=purpose,
-        ))
-        db.commit()
-    except Exception:
-        try:
-            db.rollback()
-        except Exception:
-            pass
-        logger.warning(
-            "Credential access logging failed for credential %s",
-            credential.id,
-        )
+    record_credential_access(db, credential, user, purpose=purpose)
 
 
 def _connector_http_error(exc: Exception) -> HTTPException:
@@ -611,12 +587,7 @@ def pull_device(request: DevicePullRequest, http_request: Request, db: Session =
     if use_stored and not settings.ENABLE_CREDENTIAL_VAULT:
         raise HTTPException(status_code=404, detail="Not found")
     vendor = _validated_vendor(request.vendor)
-    if request.framework not in FRAMEWORKS:
-        raise HTTPException(status_code=422, detail="Unsupported compliance framework")
-    if request.framework == "cis_cisco_ios_v1" and vendor not in {"cisco", "juniper"}:
-        raise HTTPException(status_code=422, detail="The CIS catalogue is vendor-specific; choose a vendor-neutral framework")
-    if vendor == "fortinet" and request.framework != _DEFAULT_GENERIC_FRAMEWORK:
-        raise HTTPException(status_code=422, detail="Fortinet FortiOS currently supports nist_sp_800_53_rev5")
+    validate_pull_framework(vendor, request.framework)
     credential = None
     plaintext_password = None
     try:
@@ -632,7 +603,26 @@ def pull_device(request: DevicePullRequest, http_request: Request, db: Session =
                     status_code=409,
                     detail="Stored credential device does not match the requested target",
                 )
-            username, plaintext_password, credential = _stored_ssh_credential(db, device)
+            credential = db.query(DeviceCredential).filter(
+                DeviceCredential.device_id == device.id,
+                DeviceCredential.credential_type == "ssh",
+            ).first()
+            if credential is None:
+                raise HTTPException(status_code=404, detail="Stored SSH credential not found")
+            config, dispatch_errors = pull_with_stored_credential(
+                db, device, credential, framework=request.framework, user=user,
+                purpose="manual_pull", ssh_fetch=fetch_device_config,
+                dispatch=persist_and_dispatch_configs,
+                device_name=request.device_name, port=request.port,
+            )
+            response = {
+                "config_id": config.id, "status": config.status.value,
+                "device_name": config.device_name, "vendor": config.vendor,
+                "os_type": config.os_type,
+                "selected_framework": config.selected_framework,
+                "device_id": config.device_id,
+            }
+            return {**response, "configs": [response], "dispatch_errors": dispatch_errors}
         else:
             user = acting_device_user(http_request, db)
             if user is not None:
@@ -672,8 +662,6 @@ def pull_device(request: DevicePullRequest, http_request: Request, db: Session =
         management_address=pinned_address,
     )
     dispatch_errors = persist_and_dispatch_configs(db, [config])
-    if credential is not None:
-        _record_credential_access(db, credential, user, purpose="manual_pull")
     response = {
         "config_id": config.id,
         "status": config.status.value,
@@ -700,22 +688,7 @@ def approve_remediation(config_id: UUID, finding_id: UUID, http_request: Request
     finding = _finding_for_update(db, config.id, finding_id)
     if finding is None:
         raise HTTPException(status_code=404, detail="Compliance finding not found")
-    if not finding.remediation_cli or not finding.remediation_cli.strip():
-        raise HTTPException(status_code=409, detail="Finding has no remediation text to approve")
-    action = db.query(RemediationAction).filter(RemediationAction.finding_id == finding.id).with_for_update().first()
-    if action is None:
-        action = RemediationAction(
-            finding_id=finding.id,
-            status=RemediationActionStatus.approved,
-            remediation_text=finding.remediation_cli,
-            risky=classify_risk(config.vendor, finding.remediation_cli),
-        )
-        db.add(action)
-    elif action.remediation_text != finding.remediation_cli:
-        raise HTTPException(status_code=409, detail="Approved remediation is immutable and differs from the current finding")
-    elif action.status != RemediationActionStatus.applied:
-        action.status = RemediationActionStatus.approved
-        action.failure_message = None
+    action = approve_finding_action(db, config, finding)
     db.commit()
     db.refresh(action)
     return {
@@ -748,33 +721,20 @@ def apply_approved_remediation(
             status_code=409,
             detail="This change may disconnect the management session; explicit risky-change confirmation is required",
         )
-    action.status = RemediationActionStatus.applying
-    action.failure_message = None
-    db.commit()
     try:
-        result = apply_remediation(
-            request.host, request.port, request.username,
-            request.password.get_secret_value(), config.vendor,
-            action.remediation_text,
+        result = execute_approved_action(
+            db, action, config, host=request.host, port=request.port,
+            username=request.username, password=request.password.get_secret_value(),
+            connector=apply_remediation,
         )
     except (DeviceAuthError, DeviceUnreachableError, UnsafeTargetError, PushError) as exc:
         logger.warning("Approved remediation apply failed for action %s: %s", action.id, type(exc).__name__)
-        action.status = RemediationActionStatus.failed
-        action.failure_message = str(exc)
-        db.commit()
+        mark_action_failed(db, action, str(exc))
         raise _connector_http_error(exc) from exc
     except Exception as exc:
         logger.exception("Unexpected remediation apply failure for action %s", action.id)
-        action.status = RemediationActionStatus.failed
-        action.failure_message = "Unexpected device apply failure"
-        db.commit()
+        mark_action_failed(db, action, "Unexpected device apply failure")
         raise HTTPException(status_code=502, detail="Device remediation apply failed") from exc
-    action.status = RemediationActionStatus.applied
-    action.pre_change_snapshot = result.pre_change_snapshot
-    action.post_change_snapshot = result.post_change_snapshot
-    action.diff_summary = result.diff_summary
-    action.applied_at = datetime.utcnow()
-    db.commit()
     return {
         "action_id": action.id, "finding_id": finding.id,
         "status": action.status.value, "risky": action.risky,

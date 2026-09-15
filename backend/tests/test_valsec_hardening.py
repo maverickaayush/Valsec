@@ -177,7 +177,7 @@ def test_training_transaction_scopes_mapping_and_claims_resume(monkeypatch):
     dispatch.assert_called_once()
 
 
-def test_duplicate_training_submission_is_idempotent(monkeypatch):
+def test_duplicate_training_request_is_idempotent(monkeypatch):
     config = _config()
     config.user_id = uuid4()
     finding = SimpleNamespace(

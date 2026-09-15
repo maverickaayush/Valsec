@@ -72,6 +72,55 @@ class DiscoveredDeviceStatus(str, enum.Enum):
     skipped = "skipped"
 
 
+class NetworkMissionStatus(str, enum.Enum):
+    created = "created"
+    discovering = "discovering"
+    collecting = "collecting"
+    auditing = "auditing"
+    ready_for_review = "ready_for_review"
+    remediation_pending = "remediation_pending"
+    remediating = "remediating"
+    completed = "completed"
+    partially_completed = "partially_completed"
+    failed = "failed"
+    cancelled = "cancelled"
+
+
+class MissionDeviceState(str, enum.Enum):
+    seed = "seed"
+    identified = "identified"
+    credential_missing = "credential_missing"
+    unsupported = "unsupported"
+    out_of_scope = "out_of_scope"
+    unreachable = "unreachable"
+    collection_failed = "collection_failed"
+    ready = "ready"
+    audit_queued = "audit_queued"
+    audited = "audited"
+    remediation_ready = "remediation_ready"
+
+
+class RemediationCampaignStatus(str, enum.Enum):
+    pending_approval = "pending_approval"
+    approved = "approved"
+    executing = "executing"
+    completed = "completed"
+    partially_completed = "partially_completed"
+    failed = "failed"
+    cancelled = "cancelled"
+
+
+class CampaignTargetStatus(str, enum.Enum):
+    pending = "pending"
+    approved = "approved"
+    applying = "applying"
+    verified = "verified"
+    already_compliant = "already_compliant"
+    failed = "failed"
+    rolled_back = "rolled_back"
+    unreachable = "unreachable"
+
+
 class User(Base):
     """Hosted-tier user account (routers/auth.py). Only used when
     config.REQUIRE_AUTH is True — a local single-operator deployment has no users.
@@ -102,11 +151,14 @@ class Organization(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String(255), nullable=False)
     is_personal = Column(Boolean, nullable=False, default=False)
+    require_separate_remediation_approver = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=True, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     memberships = relationship("Membership", back_populates="organization", cascade="all, delete-orphan")
     devices = relationship("Device", back_populates="organization")
+    network_missions = relationship("NetworkMission", back_populates="organization")
+    remediation_campaigns = relationship("RemediationCampaign", back_populates="organization")
 
 
 class Membership(Base):
@@ -183,6 +235,8 @@ class Device(Base):
         "DeviceCredential", back_populates="device", cascade="all, delete-orphan",
     )
     organization = relationship("Organization", back_populates="devices")
+    schedules = relationship("AuditSchedule", back_populates="device", cascade="all, delete-orphan")
+    mission_devices = relationship("NetworkMissionDevice", back_populates="device")
 
     __table_args__ = (
         Index(
@@ -222,6 +276,7 @@ class DeviceCredential(Base):
     access_logs = relationship(
         "CredentialAccessLog", back_populates="credential", cascade="all, delete-orphan",
     )
+    schedules = relationship("AuditSchedule", back_populates="credential")
 
     __table_args__ = (
         UniqueConstraint("device_id", "credential_type", name="uq_device_credentials_device_type"),
@@ -245,9 +300,171 @@ class CredentialAccessLog(Base):
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
     )
     purpose = Column(String(64), nullable=False)
+    mission_id = Column(
+        UUID(as_uuid=True), ForeignKey("network_missions.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
     accessed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     credential = relationship("DeviceCredential", back_populates="access_logs")
+
+
+class AuditSchedule(Base):
+    """Fixed-interval unattended pull and audit policy for one device."""
+    __tablename__ = "audit_schedules"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    device_id = Column(UUID(as_uuid=True), ForeignKey("devices.id", ondelete="CASCADE"), nullable=False, index=True)
+    credential_id = Column(UUID(as_uuid=True), ForeignKey("device_credentials.id", ondelete="SET NULL"), nullable=True, index=True)
+    framework = Column(String(64), nullable=False)
+    interval_minutes = Column(Integer, nullable=False)
+    enabled = Column(Boolean, nullable=False, default=False)
+    next_run_at = Column(DateTime, nullable=False)
+    last_run_at = Column(DateTime, nullable=True)
+    last_run_status = Column(String(255), nullable=False, default="awaiting_credential")
+    consecutive_failures = Column(Integer, nullable=False, default=0)
+    created_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=True, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    device = relationship("Device", back_populates="schedules")
+    credential = relationship("DeviceCredential", back_populates="schedules")
+
+    __table_args__ = (
+        CheckConstraint("interval_minutes >= 1", name="ck_audit_schedules_interval_positive"),
+        Index("ix_audit_schedules_due", "enabled", "next_run_at"),
+    )
+
+
+class NetworkMission(Base):
+    """One bounded, operator-controlled seed-to-fleet operation."""
+    __tablename__ = "network_missions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
+    created_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    seed_device_id = Column(UUID(as_uuid=True), ForeignKey("devices.id", ondelete="RESTRICT"), nullable=False, index=True)
+    framework = Column(String(64), nullable=False)
+    authorized_networks = Column(JSONB, nullable=False, default=list)
+    max_depth = Column(Integer, nullable=False)
+    max_devices = Column(Integer, nullable=False)
+    status = Column(SAEnum(NetworkMissionStatus, name="network_mission_status"), nullable=False, default=NetworkMissionStatus.created)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=True, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    organization = relationship("Organization", back_populates="network_missions")
+    seed_device = relationship("Device", foreign_keys=[seed_device_id])
+    devices = relationship("NetworkMissionDevice", back_populates="mission", cascade="all, delete-orphan")
+    events = relationship("NetworkMissionEvent", back_populates="mission", cascade="all, delete-orphan")
+    campaigns = relationship("RemediationCampaign", back_populates="mission", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        CheckConstraint("max_depth >= 1", name="ck_network_missions_max_depth"),
+        CheckConstraint("max_devices >= 1", name="ck_network_missions_max_devices"),
+        Index("ix_network_missions_org_created", "organization_id", "created_at"),
+    )
+
+
+class NetworkMissionDevice(Base):
+    """Identity evidence and progress for one address in a mission topology."""
+    __tablename__ = "network_mission_devices"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    mission_id = Column(UUID(as_uuid=True), ForeignKey("network_missions.id", ondelete="CASCADE"), nullable=False, index=True)
+    device_id = Column(UUID(as_uuid=True), ForeignKey("devices.id", ondelete="SET NULL"), nullable=True, index=True)
+    config_id = Column(UUID(as_uuid=True), ForeignKey("configs.id", ondelete="SET NULL"), nullable=True, index=True)
+    address = Column(String(64), nullable=False)
+    parent_address = Column(String(64), nullable=True)
+    depth = Column(Integer, nullable=False, default=0)
+    vendor_hint = Column(String(64), nullable=True)
+    platform_hint = Column(String(255), nullable=True)
+    discovery_sources = Column(JSONB, nullable=False, default=list)
+    raw_evidence = Column(JSONB, nullable=False, default=dict)
+    state = Column(SAEnum(MissionDeviceState, name="mission_device_state"), nullable=False)
+    reason = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=True, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    mission = relationship("NetworkMission", back_populates="devices")
+    device = relationship("Device", back_populates="mission_devices")
+    config = relationship("Config")
+
+    __table_args__ = (
+        UniqueConstraint("mission_id", "address", name="uq_network_mission_device_address"),
+        Index("ix_network_mission_devices_state", "mission_id", "state"),
+    )
+
+
+class NetworkMissionEvent(Base):
+    """Append-only, sanitized mission state-transition record."""
+    __tablename__ = "network_mission_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    mission_id = Column(UUID(as_uuid=True), ForeignKey("network_missions.id", ondelete="CASCADE"), nullable=False, index=True)
+    device_id = Column(UUID(as_uuid=True), ForeignKey("devices.id", ondelete="SET NULL"), nullable=True)
+    actor_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    event_type = Column(String(64), nullable=False)
+    detail = Column(JSONB, nullable=False, default=dict)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    mission = relationship("NetworkMission", back_populates="events")
+
+
+class RemediationCampaign(Base):
+    """One reviewed logical control fix with independently executed targets."""
+    __tablename__ = "remediation_campaigns"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    mission_id = Column(UUID(as_uuid=True), ForeignKey("network_missions.id", ondelete="CASCADE"), nullable=False, index=True)
+    organization_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
+    created_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    approved_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    framework = Column(String(64), nullable=False)
+    control_id = Column(String(32), nullable=False)
+    title = Column(String(255), nullable=False)
+    status = Column(SAEnum(RemediationCampaignStatus, name="remediation_campaign_status"), nullable=False, default=RemediationCampaignStatus.pending_approval)
+    approved_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, nullable=True, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    mission = relationship("NetworkMission", back_populates="campaigns")
+    organization = relationship("Organization", back_populates="remediation_campaigns")
+    targets = relationship("RemediationCampaignTarget", back_populates="campaign", cascade="all, delete-orphan")
+
+    __table_args__ = (Index("ix_remediation_campaign_control", "mission_id", "framework", "control_id"),)
+
+
+class RemediationCampaignTarget(Base):
+    """Stable per-device execution boundary for an approved campaign."""
+    __tablename__ = "remediation_campaign_targets"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    campaign_id = Column(UUID(as_uuid=True), ForeignKey("remediation_campaigns.id", ondelete="CASCADE"), nullable=False, index=True)
+    mission_device_id = Column(UUID(as_uuid=True), ForeignKey("network_mission_devices.id", ondelete="CASCADE"), nullable=False, index=True)
+    device_id = Column(UUID(as_uuid=True), ForeignKey("devices.id", ondelete="CASCADE"), nullable=False, index=True)
+    finding_id = Column(UUID(as_uuid=True), ForeignKey("compliance_results.id", ondelete="CASCADE"), nullable=False, index=True)
+    remediation_action_id = Column(UUID(as_uuid=True), ForeignKey("remediation_actions.id", ondelete="SET NULL"), nullable=True, index=True)
+    verification_config_id = Column(UUID(as_uuid=True), ForeignKey("configs.id", ondelete="SET NULL"), nullable=True, index=True)
+    status = Column(SAEnum(CampaignTargetStatus, name="campaign_target_status"), nullable=False, default=CampaignTargetStatus.pending)
+    failure_message = Column(Text, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    campaign = relationship("RemediationCampaign", back_populates="targets")
+    mission_device = relationship("NetworkMissionDevice")
+    device = relationship("Device")
+    finding = relationship("ComplianceResult")
+    remediation_action = relationship("RemediationAction")
+    verification_config = relationship("Config", foreign_keys=[verification_config_id])
+
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "finding_id", name="uq_campaign_target_finding"),
+        Index("ix_campaign_targets_campaign_status", "campaign_id", "status"),
+    )
 
 
 class Config(Base):

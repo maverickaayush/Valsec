@@ -61,7 +61,10 @@ def _validated_device_name(value: str) -> str:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-def persist_and_dispatch_configs(db: Session, configs: list[Config]) -> list[str]:
+def persist_and_dispatch_configs(
+    db: Session, configs: list[Config], *, queue: str | None = None,
+    allow_ai_proposals: bool = True,
+) -> list[str]:
     """Persist queued configs, then independently dispatch every audit."""
     for config in configs:
         db.add(config)
@@ -72,7 +75,13 @@ def persist_and_dispatch_configs(db: Session, configs: list[Config]) -> list[str
     dispatch_errors: list[str] = []
     for config in configs:
         try:
-            run_config_audit.delay(str(config.id))
+            task_args = [str(config.id)] if allow_ai_proposals else [str(config.id), False]
+            if queue:
+                run_config_audit.apply_async(args=task_args, queue=queue)
+            elif allow_ai_proposals:
+                run_config_audit.delay(str(config.id))
+            else:
+                run_config_audit.apply_async(args=task_args)
         except Exception:
             logger.exception("Failed to dispatch config audit %s", config.id)
             config.status = ConfigStatus.failed

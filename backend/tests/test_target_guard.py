@@ -29,3 +29,18 @@ def test_resolution_is_pinned_to_returned_ip(monkeypatch):
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.50.7", 0)),
     ])
     assert target_guard.assert_connectable_target("router.internal") == "192.168.50.7"
+
+
+def test_explicit_scope_and_admin_allow_list_are_enforced(monkeypatch):
+    assert target_guard.assert_connectable_target("10.10.4.7", ["10.10.0.0/16"]) == "10.10.4.7"
+    with pytest.raises(target_guard.UnsafeTargetError, match="outside"):
+        target_guard.assert_connectable_target("10.20.4.7", ["10.10.0.0/16"])
+    monkeypatch.setattr(target_guard.settings, "AUTHORIZED_NETWORKS", "10.0.0.0/8")
+    assert target_guard.validate_requested_scope(["10.20.0.0/16"]) == ["10.20.0.0/16"]
+    with pytest.raises(target_guard.UnsafeTargetError, match="outside AUTHORIZED_NETWORKS"):
+        target_guard.validate_requested_scope(["192.168.0.0/16"])
+
+
+def test_scope_validation_never_resolves_or_scans(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("no resolution")))
+    assert target_guard.validate_requested_scope(["172.16.4.0/24"]) == ["172.16.4.0/24"]

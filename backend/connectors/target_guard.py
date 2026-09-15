@@ -4,6 +4,8 @@ from __future__ import annotations
 import ipaddress
 import socket
 
+from config import settings
+
 
 class UnsafeTargetError(Exception):
     """The supplied host resolves to an address Valsec must never contact."""
@@ -22,7 +24,43 @@ def _is_blocked(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return address.is_loopback or address == _METADATA_ADDRESS
 
 
-def assert_connectable_target(host: str) -> str:
+def parse_network_scope(value: str | list[str] | tuple[str, ...] | None) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    """Parse a bounded operator/admin CIDR list without resolving any hosts."""
+    if value is None:
+        entries: list[str] = []
+    elif isinstance(value, str):
+        entries = [item.strip() for item in value.split(",") if item.strip()]
+    else:
+        entries = [str(item).strip() for item in value if str(item).strip()]
+    networks = []
+    for entry in entries:
+        try:
+            network = ipaddress.ip_network(entry, strict=False)
+        except ValueError as exc:
+            raise UnsafeTargetError(f"Invalid authorized network CIDR: {entry}") from exc
+        if _is_blocked(network.network_address) or _is_blocked(network.broadcast_address):
+            raise UnsafeTargetError("Authorized networks cannot include loopback or metadata services")
+        networks.append(network)
+    return tuple(networks)
+
+
+def validate_requested_scope(requested: list[str] | tuple[str, ...]) -> list[str]:
+    """Require mission scope and constrain it to the deployment allow-list."""
+    networks = parse_network_scope(requested)
+    if not networks:
+        raise UnsafeTargetError("At least one authorized network CIDR is required")
+    administrative = parse_network_scope(settings.AUTHORIZED_NETWORKS)
+    if administrative:
+        for network in networks:
+            if not any(
+                network.version == allowed.version and network.subnet_of(allowed)
+                for allowed in administrative
+            ):
+                raise UnsafeTargetError(f"Mission network {network} is outside AUTHORIZED_NETWORKS")
+    return [str(network) for network in networks]
+
+
+def assert_connectable_target(host: str, allowed_networks: list[str] | tuple[str, ...] | None = None) -> str:
     """Validate ``host`` and return one resolved IP for the actual connection.
 
     Returning the resolved address is intentional: callers pass this exact value
@@ -51,4 +89,14 @@ def assert_connectable_target(host: str) -> str:
             addresses.append(normalized)
     if not addresses:
         raise TargetResolutionError("Device host did not resolve to an IP address")
-    return addresses[0]
+    selected = addresses[0]
+    # An explicit mission scope takes precedence. Otherwise every connector
+    # path observes the deployment-wide allow-list when one is configured.
+    scope = parse_network_scope(
+        allowed_networks if allowed_networks is not None else settings.AUTHORIZED_NETWORKS
+    )
+    if scope:
+        address = ipaddress.ip_address(selected)
+        if not any(address.version == network.version and address in network for network in scope):
+            raise UnsafeTargetError("Device target is outside the authorized network scope")
+    return selected

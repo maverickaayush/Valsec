@@ -1,8 +1,8 @@
 # Valsec final engineering handoff
 
-Updated: 14 September 2026 (Asia/Kolkata)
+Updated: 15 September 2026 (Asia/Kolkata)
 
-## Submission state
+## Product state
 
 Valsec is a standalone network-device configuration compliance product. The prior web assessment product, its routes, task graph, data tables, Docker services, frontend pages, documentation, tools, tests, and assets have been removed from the active tree. PostgreSQL, Redis, Celery, FastAPI, local Ollama, WeasyPrint reporting, authentication/ownership primitives, and the Valsec frontend remain.
 
@@ -32,9 +32,11 @@ The NIST, DISA, ISO, and vendor catalogues outside the Cisco CIS set are represe
 
 Regression coverage proves valid proposal → probable, absent/malformed proposal → unverified, API confidence exposure, and operator approval → confirmed.
 
-## Removed legacy product components
+## Repository boundary
 
-Removed scanner-specific FastAPI routes, Celery tasks, analysis/scoring modules, report renderer/template, target network guard, scanner credentials/config, Modal functions, ZAP scripts/session data, vulnerable practice services, scanner dependencies and binaries, scanner frontend routes/components/API code, scanner tests, screenshots, documentation, automation scripts/logs, and Nimbus prototype sources/archive. Docker Compose now has only PostgreSQL, Redis, backend, worker, and frontend. The backend image contains only Valsec/PDF dependencies and runs as an unprivileged user.
+The active repository is Valsec-only. Docker Compose contains PostgreSQL, Redis,
+the FastAPI backend, Celery worker, and frontend. The backend image contains the
+network compliance and PDF dependencies and runs as an unprivileged user.
 
 The database migration chain is a Valsec-only baseline followed by migrations for user-scoped learned mappings, remediation actions, and discovery sessions. The active ORM contains only Valsec authentication, audit, compliance, reporting, remediation, and discovery entities.
 
@@ -64,7 +66,7 @@ A fresh `valsec_final` Compose project was tested against local `qwen2.5:7b`:
 - NewCo unknown syntax received a live Ollama `ssh.version` proposal at 0.95 and persisted as `probable` / `ai_proposal`.
 - Operator approval persisted a `NewCo NOS` learned mapping, resumed the audit, and completed it with a PDF.
 - A later mixed multipart upload containing Cisco plus the identical NewCo syntax completed both devices without training; the NewCo finding was `confirmed` / `learned_mapping`.
-- User/vendor isolation, duplicate submission, concurrent training, unsafe ZIP, ownership, report authorization, and dispatch-failure recovery are covered by passing focused tests.
+- User/vendor isolation, duplicate requests, concurrent training, unsafe ZIP, ownership, report authorization, and dispatch-failure recovery are covered by passing focused tests.
 - A live missing-template Cisco remediation call returned a complete `configure terminal … end` block marked `ai_generated_fallback`.
 - Frontend `http://localhost:3000` served successfully and fetched `/api/configs` through its real same-origin proxy.
 
@@ -96,9 +98,9 @@ See the Git diff for the complete removal list and all modified integration file
 - Fortinet supports the implemented NIST catalogue; other Fortinet framework combinations return an explicit unsupported response.
 - Generic-vendor onboarding can only evaluate controls supported by schema fields an operator has taught; it is not a hand-written vendor adapter.
 - Ollama availability and output quality affect proposal/remediation convenience only. Manual training and deterministic results remain available.
-- Optional hosted authentication APIs remain available, while the submission frontend is optimized for the default local single-operator demo and has no account-management screens.
+- Optional hosted authentication APIs remain available, while the frontend also supports the default local single-operator deployment and has no account-management screens.
 - One moderate transitive frontend production advisory remains in `baseline-browser-mapping`; no high or critical production advisory remains.
-- Remediation approval/PUSH remains disabled when `REQUIRE_AUTH=true`. Pull/discovery uses the P1-3 Organization membership boundary; local mode remains unchanged.
+- The legacy request-credential remediation endpoint remains local-only. Network Mission campaigns use Organization roles in authenticated deployments; local mode remains unchanged.
 - Cisco applies running configuration only. Junos uses a five-minute confirmed commit. FortiOS has no automatic push procedure in this pass, and risky generic/UCI changes are always manual.
 - First-contact SSH currently accepts the appliance host key for the ephemeral connector session. Operators should use a trusted management LAN; persistent fingerprint enrollment is a future hardening item.
 
@@ -118,7 +120,7 @@ See the Git diff for the complete removal list and all modified integration file
 1. Review the working-tree diff, especially the deliberate removal of the old product and rewritten clean baseline migration.
 2. Copy `.env.example` to `.env`, set strong production secrets if exposing the service, and confirm `qwen2.5:7b` is installed in local Ollama.
 3. Use `backend/tests/sample_configs/mixed_vendor_fleet.zip`; provide vendor hint `unknown.conf = NewCo NOS` in the UI to demonstrate the learning gate.
-4. If scope continues after submission, expand the representative NIST/DISA/ISO catalogues with reviewed authoritative control mappings and vendor evidence tests.
+4. Expand the representative NIST/DISA/ISO catalogues only with reviewed authoritative control mappings and vendor evidence tests.
 
 ## Seed neighbor discovery and Cirotech Telnet pull (13 September 2026)
 
@@ -164,7 +166,7 @@ See the Git diff for the complete removal list and all modified integration file
 
 ## Post-cleanup repository audit (14 September 2026)
 
-- Removed stale references to the deleted team-ownership document, submission ZIP, scanner-era database modules/settings, prototype frontend naming, and deleted sign-in/sign-up pages. Current reviewer ownership points to `.github/CODEOWNERS`.
+- Removed stale references to deleted documents, retired database modules/settings, experimental frontend naming, and deleted sign-in/sign-up pages. Current reviewer ownership points to `.github/CODEOWNERS`.
 - README links, documented source paths, sample configurations, migrations, frontend routes, API endpoints, framework coverage, and the OpenWrt/Cirotech demo flow were checked against the active Valsec-only tree.
 - Added `httpx>=0.27,<1` to `backend/requirements-dev.txt`, the canonical CI/test dependency set required by FastAPI/Starlette `TestClient`.
 - Verification passed for backend compilation, 265 non-HTTP-TestClient backend tests, `npm ci`, frontend typecheck, frontend production build, Docker Compose configuration, and `git diff --check`. The remaining HTTP `TestClient` test could not execute in the restricted local sandbox because its preinstalled Python 3.14 runtime cannot create the required stream file descriptor; CI uses Python 3.11 with the repository-pinned dependencies and now installs `httpx` explicitly.
@@ -294,3 +296,192 @@ and cross-organization access remains denied.
 - `python3 -m compileall -q backend migrations`, `docker compose config -q`,
   frontend typecheck, the Node 20 containerized production build, Alembic head
   inspection, and `git diff --check` pass.
+
+## P1-2 recurring unattended audits (15 September 2026)
+
+### Step 0 findings
+
+- P1-1 credentials contain `device_id`, transport type, username, opaque
+  backend reference, creator/rotation/timestamps; successful use appends
+  `CredentialAccessLog(credential_id, accessed_by_user_id, purpose,
+  accessed_at)`. Retrieval and logging were extracted from the existing
+  `_stored_ssh_credential()` / `_record_credential_access()` path into
+  `credential_service.py`, and both manual and scheduled stored pulls now use
+  `device_pull_service.pull_with_stored_credential()`.
+- P1-3 roles remain `owner`, `operator`, and `viewer`. Schedule mutations use
+  `OPERATE_ROLES`; device schedule reads use `READ_ROLES`; organization-wide
+  schedule reads intentionally require owner/operator.
+- The pre-P1-2 Alembic head was confirmed as `c8d2e5f71a40`.
+- Vault-disabled credential APIs already returned a side-effect-free 404.
+  Every schedule endpoint calls the same `_require_vault()` guard first.
+- Manual pull used connector → `Config` → `persist_and_dispatch_configs()`.
+  That same path now accepts an optional queue so scheduled Config audits stay
+  isolated without changing interactive dispatch.
+
+### Runtime contract
+
+- Celery Beat sends one `poll_due_schedules` task every
+  `SCHEDULE_POLL_SECONDS` (default 60). It locks and selects enabled,
+  credentialed schedules whose `next_run_at` is due, then dispatches each to
+  the `scheduled_audits` queue.
+- Run `celery -A tasks.celery_app beat --loglevel=info` and a dedicated worker
+  with `celery -A tasks.celery_app worker --loglevel=info -Q scheduled_audits
+  -n scheduled@%h`. The existing worker continues consuming the default
+  interactive queue.
+- Transient `DeviceUnreachableError` failures retry with bounded exponential
+  backoff; `DeviceAuthError` is permanent and is not retried. The default
+  `SCHEDULE_FAILURE_THRESHOLD=3` disables repeatedly failing schedules and
+  records an `auto_disabled:<reason>` status. Success resets failures to zero.
+- No-credential schedules are explicitly disabled as `awaiting_credential`.
+  Scheduled secret access is transient, attributed with purpose
+  `scheduled_audit`, and never returned or logged.
+
+P1-2 is purely additive: revision `f1a4c7d92e63` adds one table, plus one queue
+and schedule endpoints; it rewrites no existing data and does not carry P1-3's
+data-mapping urgency. The retry/backoff and auto-disable defaults merit a quick
+fleet-specific sanity check before unattended reliance.
+
+### Verification
+
+- A disposable PostgreSQL 16 database completed a fresh `base → head` upgrade,
+  `f1a4c7d92e63 → c8d2e5f71a40` downgrade, and re-upgrade. The resulting table,
+  foreign keys, positive-interval constraint, and due/credential/device indexes
+  were inspected; the disposable database was then removed.
+- The exact Python 3.11 CI-runtime suite reports **323 passed**. The host Python
+  3.14 run reports **322 passed, 1 deselected** solely for the documented
+  sandbox TestClient stream-FD issue.
+- Scheduled tests cover time-based due selection, no-credential exclusion,
+  dedicated routing for both pull and compliance work, transient retry,
+  permanent authentication failure, quarantine threshold, success reset,
+  credential revocation, role gating, local mode, vault-off side-effect-free
+  404s, and secret non-observability.
+- Backend/migration compilation, Compose validation, Alembic head inspection,
+  route registration, and `git diff --check` pass. Current head:
+  `f1a4c7d92e63`.
+
+## Seed-to-fleet Network Missions (15 September 2026)
+
+### Existing-system map and reuse
+
+- Discovery already used `discover_seed_neighbors()` with fixed Cisco CDP/LLDP,
+  Juniper LLDP, or Linux LLDP/kernel-neighbor commands, plus bounded BFS and
+  resolve-then-pin validation. Missions retain those commands but automatically
+  manage only supported identities established by CDP/LLDP; ARP-only evidence
+  is persisted and never contacted.
+- Manual/scheduled stored pulls already converged on
+  `device_pull_service.pull_with_stored_credential()` and
+  `persist_and_dispatch_configs()`. Mission collection calls those functions
+  with UUID-only task messages and the `network_missions` audit queue.
+- The existing audit worker remains the only normalization/compliance/report
+  lifecycle. The mission layer adds no AI invocation and does not influence
+  verdict, severity, score, or remediation generation.
+- Manual remediation already froze exact finding text in `RemediationAction`
+  and called `connectors.ssh_push.apply_remediation()` for pre-snapshot,
+  vendor-specific transaction, post-change re-pull, diff, and Junos rollback.
+  Shared approval/execution helpers now serve both that endpoint and campaigns;
+  no connector or push engine was duplicated.
+
+### Domain and security boundary
+
+Additive revision `a6e3d9f42b17` adds `NetworkMission`,
+`NetworkMissionDevice`, `NetworkMissionEvent`, `RemediationCampaign`, and
+`RemediationCampaignTarget`, plus nullable mission attribution on
+`CredentialAccessLog`. No existing data is rewritten.
+
+Mission roles follow the existing matrix: viewer can inspect; operator/owner
+can create/start/collect and propose or execute an already-approved campaign;
+owner alone approves. Proposal never implies approval. Creator and approver IDs
+remain distinct fields so a future deployment can require different people
+without changing campaign data. Local `REQUIRE_AUTH=false` continues to use
+NULL organization/user attribution and skips membership checks.
+
+Every mission requires explicit CIDRs. If `AUTHORIZED_NETWORKS` is configured,
+the requested list must be a subset. Discovery, collection, and remediation all
+pass their pinned target through the same central scope guard. Out-of-scope
+evidence creates a sanitized `target_rejected` event. No CIDR enumeration,
+subnet scan, port scan, arbitrary command, credential reuse across devices, or
+credential spraying was added.
+
+Credential accesses use purposes `network_mission_discovery`,
+`network_mission_pull`, and `network_mission_remediation`; plaintext is never a
+task argument or persisted field. Campaigns exclude AI-fallback remediation and
+store per-device action text, so matching controls across Cisco and Juniper do
+not imply matching commands.
+
+### Runtime
+
+Run workers dedicated to mission orchestration and remediation; do not add
+either queue to the interactive worker. The default bounds are 5 mission
+operations and 3 configuration changes:
+
+```bash
+celery -A tasks.celery_app worker --loglevel=info -Q network_missions -n missions@%h --concurrency=${MISSION_MAX_CONCURRENT_OPERATIONS:-5}
+celery -A tasks.celery_app worker --loglevel=info -Q remediation -n remediation@%h --concurrency=${REMEDIATION_MAX_CONCURRENT_OPERATIONS:-3}
+```
+
+The HTTP API creates/starts missions and returns immediately. The mission task
+does bounded discovery, dispatches at most the configured device cap, sends
+each Config through the existing audit worker on the same isolated queue, and
+polls persisted terminal states. Campaign execution dispatches one idempotent
+target task per approved finding/device to the separate `remediation` queue;
+already-verified targets are no-ops
+and a newer PASS is recorded as already compliant. Verified post-change
+snapshots are persisted as normal Configs, audited by the existing worker, and
+used for the mission's score-after posture.
+
+### Verification and lab status
+
+- Focused tests cover vault-off side-effect-free 404s, local-mode NULL
+  ownership, ID-only routing, CIDR/admin-scope enforcement without address
+  enumeration, bounded/cyclic topology, ARP identity rejection, out-of-scope
+  evidence, shared pull/audit ingestion, credential mission attribution and
+  non-observability, organization role isolation, vendor-specific campaign
+  actions, approval-before-execution, and per-target queue dispatch.
+- The repository's physical lab documents OpenWrt plus an ARP-only Cirotech
+  neighbor. That topology cannot safely prove automatic neighbor management or
+  remediation because Cirotech exposes neither CDP nor LLDP and has no safe
+  automatic Telnet push. No live physical end-to-end mission was performed or
+  claimed in this pass. The mock transport suite remains fully runnable without
+  hardware; `docs/DEMO_SETUP.md` states the exact lab boundary.
+- A clean Python 3.11 backend container reports **336 passed**. The host Python
+  3.14 environment reports **335 passed with the single TestClient endpoint
+  test omitted** because that environment cannot create AnyIO stream FDs; the
+  clean container executed that test successfully.
+- A disposable PostgreSQL 16 database completed fresh `base → a6e3d9f42b17`,
+  one-revision downgrade to `f1a4c7d92e63`, and re-upgrade. The five new tables
+  and head were inspected, then the disposable database was removed.
+- Backend/migration compilation, frontend typecheck and production build,
+  `docker compose config -q`, route import, Alembic head inspection, and
+  `git diff --check` pass.
+
+## Product coherence and dual-control readiness (15 September 2026)
+
+- Network Missions are the primary fleet workflow in the frontend. The command
+  center, device registry, mission list/detail, audits, and framework catalogue
+  now share direct navigation.
+- Mission detail responses add seed/Organization context, explicit identity,
+  authorization, credential, connector, collection, audit, and remediation
+  eligibility fields. Findings are filterable and paginated and carry the
+  device, Config, control, description, and observed evidence needed to trace a
+  fleet result back to its deterministic audit.
+- The mission command center presents actionable progress, bounded scope,
+  topology reasons, fleet posture, device evidence, exact campaign changes,
+  approval state, verified diffs, failures, and sanitized chronological events.
+  Dangerous approval and execution actions require an explicit browser
+  confirmation.
+- Additive revision `d4b8e1c73f20` adds
+  `Organization.require_separate_remediation_approver`, default `false` for
+  compatibility. Owners may change it through
+  `PATCH /api/organizations/{id}/remediation-policy`. When enabled, the campaign
+  creator cannot approve the campaign; a different owner is required.
+- Unexpected remediation exceptions are reduced to a stable operator-safe
+  message in database/API state and logs contain only the target identifier and
+  exception type. Known connector failures retain their existing sanitized
+  operational reason. Secrets remain absent from task arguments and campaign
+  records.
+- Public-facing origin/event language and obsolete repository identity text
+  were removed. The repository describes Valsec solely as a network security
+  compliance platform.
+- Mission orchestration stays on `network_missions`; approved configuration
+  mutation runs on `remediation` with
+  `REMEDIATION_MAX_CONCURRENT_OPERATIONS=3` by default.

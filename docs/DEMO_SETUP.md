@@ -183,6 +183,23 @@ the persisted audit result. The discovery session also preserves each
 candidate's state, linked Config ID, and live audit status across a page
 refresh.
 
+## Network Mission compatibility of this lab
+
+The OpenWrt/Cirotech pair validates the legacy evidence-and-manual-processing
+flow above, but it is not evidence of a complete automatic Network Mission.
+Cirotech advertises no CDP/LLDP identity and appears only in OpenWrt's kernel
+neighbor/ARP tables. The mission safety policy therefore records it as
+`unsupported` with an identity-required reason and does not try its Telnet
+credential. This is intentional protection against treating an arbitrary ARP
+host as managed equipment.
+
+The OpenWrt seed can demonstrate mission creation, CIDR enforcement, stored
+seed credential access, bounded discovery, and the explicit ineligible
+Cirotech result. A complete collection/remediation demonstration requires an
+authorized SSH-capable neighbor that advertises supported CDP/LLDP identity and
+has its own Device-bound vault credential. No such additional hardware is
+documented here, so do not claim a physical end-to-end campaign from this lab.
+
 ## Emergency recovery
 
 - **Cannot reach either router:** check physical port/cable mapping, run `bridge link`, then repeat the two bridge-scoped pings. Confirm the route uses `br-valsec` and host address `.250`.

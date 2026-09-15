@@ -31,7 +31,7 @@ jobs:
       - run: pip install -r backend/requirements.txt -r backend/requirements-dev.txt
       - name: Compile backend
         run: python -m compileall -q backend migrations
-      - name: Verify migration chain and organization downgrade
+      - name: Verify migration chain and latest-feature downgrade
         run: |
           alembic upgrade e2f6c8a41d90
           alembic upgrade head

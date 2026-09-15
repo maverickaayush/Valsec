@@ -347,6 +347,127 @@ export interface DevicePatch {
   is_active?: boolean
 }
 
+export type NetworkMissionStatus = 'created' | 'discovering' | 'collecting' | 'auditing' | 'ready_for_review' | 'remediation_pending' | 'remediating' | 'completed' | 'partially_completed' | 'failed' | 'cancelled'
+export type MissionDeviceState = 'seed' | 'identified' | 'credential_missing' | 'unsupported' | 'out_of_scope' | 'unreachable' | 'collection_failed' | 'ready' | 'audit_queued' | 'audited' | 'remediation_ready'
+
+export interface MissionSummary {
+  devices_discovered: number
+  devices_eligible: number
+  devices_audited: number
+  devices_compliant: number
+  devices_requiring_remediation: number
+  devices_processing: number
+  devices_awaiting_credential: number
+  devices_unsupported: number
+  devices_out_of_scope: number
+  devices_unreachable: number
+  critical_findings: number
+  high_findings: number
+  medium_findings: number
+  low_findings: number
+  overall_compliance_score: number | null
+  score_before: number | null
+  score_after: number | null
+  controls_remediated: number
+  devices_require_manual_action: number
+  devices_rolled_back: number
+}
+
+export interface NetworkMission {
+  id: string
+  organization_id: string | null
+  organization_name: string | null
+  require_separate_remediation_approver: boolean
+  created_by_user_id: string | null
+  seed_device_id: string
+  seed_device_name: string
+  seed_management_address: string | null
+  framework: FrameworkKey
+  authorized_networks: string[]
+  max_depth: number
+  max_devices: number
+  status: NetworkMissionStatus
+  started_at: string | null
+  completed_at: string | null
+  created_at: string
+  updated_at: string | null
+  summary: MissionSummary
+  events?: Array<{ id: string; event_type: string; device_id: string | null; actor_user_id: string | null; detail: Record<string, unknown>; created_at: string }>
+}
+
+export interface MissionDevice {
+  id: string
+  device_id: string | null
+  config_id: string | null
+  address: string
+  parent_address: string | null
+  depth: number
+  vendor_hint: string | null
+  platform_hint: string | null
+  discovery_sources: string[]
+  state: MissionDeviceState
+  reason: string | null
+  audit_status: ConfigStatus | null
+  compliance_score: number | null
+  identity_status: 'verified' | 'unverified'
+  authorization_status: 'authorized' | 'out_of_scope' | 'not_authorized'
+  credential_status: 'ready' | 'required'
+  connector_status: 'supported' | 'unsupported'
+  collection_status: 'pending' | 'collected' | 'failed'
+  remediation_eligible: boolean
+}
+
+export interface MissionFindingGroup {
+  framework: string
+  control_id: string
+  title: string
+  severity: ComplianceSeverity
+  remediation_available: boolean
+  affected_devices: Array<{
+    device_id: string
+    device_name: string
+    vendor: string
+    finding_id: string
+    config_id: string
+    description: string
+    observed_value: string | null
+    verdict: 'FAIL'
+    remediation_text: string | null
+    is_remediation_fallback: boolean
+  }>
+}
+
+export interface CampaignTarget {
+  id: string
+  device_id: string
+  device_name: string
+  vendor: string
+  finding_id: string
+  verification_config_id: string | null
+  status: 'pending' | 'approved' | 'applying' | 'verified' | 'already_compliant' | 'failed' | 'rolled_back' | 'unreachable'
+  remediation_text: string | null
+  risky: boolean | null
+  diff_summary: string | null
+  failure_message: string | null
+}
+
+export interface RemediationCampaign {
+  id: string
+  mission_id: string
+  organization_id: string | null
+  framework: string
+  control_id: string
+  title: string
+  status: 'pending_approval' | 'approved' | 'executing' | 'completed' | 'partially_completed' | 'failed' | 'cancelled'
+  affected_device_count: number
+  created_by_user_id: string | null
+  approved_by_user_id: string | null
+  created_at: string
+  completed_at: string | null
+  approved_at: string | null
+  targets: CampaignTarget[]
+}
+
 export class ValsecApiError extends Error {
   constructor(public status: number, message: string, public body?: unknown) {
     super(message)
@@ -534,4 +655,64 @@ export async function getDeviceDrift(
 
 export async function getFleetSummary(staleSinceDays = 30): Promise<FleetSummary> {
   return handle<FleetSummary>(await fetch(`/api/fleet/summary?stale_since_days=${staleSinceDays}`, { cache: 'no-store' }))
+}
+
+export async function createNetworkMission(request: {
+  seed_device_id: string
+  framework: FrameworkKey
+  authorized_networks: string[]
+  max_depth: number
+  max_devices: number
+}): Promise<NetworkMission> {
+  return handle<NetworkMission>(await fetch('/api/network-missions', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request),
+  }))
+}
+
+export async function getNetworkMissions(page = 1, pageSize = 25): Promise<{ items: NetworkMission[]; page: number; page_size: number; total: number }> {
+  return handle(await fetch(`/api/network-missions?page=${page}&page_size=${pageSize}`, { cache: 'no-store' }))
+}
+
+export async function getNetworkMission(id: string): Promise<NetworkMission> {
+  return handle(await fetch(`/api/network-missions/${id}`, { cache: 'no-store' }))
+}
+
+export async function startNetworkMission(id: string): Promise<{ mission_id: string; status: string }> {
+  return handle(await fetch(`/api/network-missions/${id}/start`, { method: 'POST' }))
+}
+
+export async function retryNetworkMissionAudit(id: string): Promise<{ mission_id: string; dispatched: number }> {
+  return handle(await fetch(`/api/network-missions/${id}/audit`, { method: 'POST' }))
+}
+
+export async function getMissionDevices(id: string, state?: MissionDeviceState): Promise<{ mission_id: string; items: MissionDevice[]; total: number }> {
+  const query = new URLSearchParams({ page_size: '250' })
+  if (state) query.set('state', state)
+  return handle(await fetch(`/api/network-missions/${id}/devices?${query}`, { cache: 'no-store' }))
+}
+
+export async function getMissionFindings(id: string, filters: { severity?: string; device_id?: string; vendor?: string; control_id?: string } = {}): Promise<{ mission_id: string; items: MissionFindingGroup[]; total: number }> {
+  const query = new URLSearchParams({ page_size: '100' })
+  Object.entries(filters).forEach(([key, value]) => { if (value) query.set(key, value) })
+  return handle(await fetch(`/api/network-missions/${id}/findings?${query}`, { cache: 'no-store' }))
+}
+
+export async function getMissionCampaigns(id: string): Promise<{ mission_id: string; items: RemediationCampaign[] }> {
+  return handle(await fetch(`/api/network-missions/${id}/remediation-campaigns`, { cache: 'no-store' }))
+}
+
+export async function createRemediationCampaign(missionId: string, controlId: string): Promise<RemediationCampaign> {
+  return handle(await fetch(`/api/network-missions/${missionId}/remediation-campaigns`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ control_id: controlId }),
+  }))
+}
+
+export async function approveCampaign(id: string, confirmRisky = false): Promise<RemediationCampaign> {
+  return handle(await fetch(`/api/remediation-campaigns/${id}/approve`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm_risky: confirmRisky }),
+  }))
+}
+
+export async function executeCampaign(id: string): Promise<{ campaign_id: string; status: string; dispatched: number }> {
+  return handle(await fetch(`/api/remediation-campaigns/${id}/execute`, { method: 'POST' }))
 }

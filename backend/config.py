@@ -13,8 +13,19 @@ class Settings(BaseSettings):
     MAX_CONCURRENT_AUDITS: int = 5
     ENABLE_CREDENTIAL_VAULT: bool = False
     CREDENTIAL_VAULT_KEY: str = ''
+    SCHEDULE_POLL_SECONDS: int = 60
+    SCHEDULE_FAILURE_THRESHOLD: int = 3
+    SCHEDULE_MAX_RETRIES: int = 3
+    SCHEDULE_RETRY_BACKOFF_SECONDS: int = 60
     DISCOVERY_MAX_DEPTH: int = 3
     DISCOVERY_MAX_DEVICES: int = 25
+    # Optional deployment-wide allow-list. Mission-requested CIDRs must be a
+    # subset; all connector paths continue to reject loopback and metadata.
+    AUTHORIZED_NETWORKS: str = ''
+    MISSION_MAX_CONCURRENT_OPERATIONS: int = 5
+    REMEDIATION_MAX_CONCURRENT_OPERATIONS: int = 3
+    MISSION_AUDIT_POLL_SECONDS: int = 5
+    MISSION_AUDIT_POLL_LIMIT: int = 120
     OLLAMA_MAPPING_BATCH_SIZE: int = 24
     OLLAMA_MAPPING_MAX_CANDIDATES: int = 96
     SECRET_KEY: str = 'change-me-in-production'

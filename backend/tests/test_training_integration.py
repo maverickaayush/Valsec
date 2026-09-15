@@ -84,13 +84,13 @@ class TestOperatorTrainingPersistence:
     """Verify POST /train correctly persists learned mappings."""
 
     def test_training_persists_mapping(self):
-        """Verify training submission creates learned_mapping record."""
+        """Verify a training request creates a learned_mapping record."""
         # Mock database
         mock_db = MagicMock()
         mock_db.query.return_value.filter.return_value.first.return_value = None  # No existing mapping
         mock_db.query.return_value.filter.return_value.count.return_value = 0
 
-        # Simulate training submission
+        # Simulate an operator training request.
         # Numeric value triggers wildcard in pattern signature
         raw_line = "custom-command 2026"
         pattern = _generate_pattern_signature(raw_line)

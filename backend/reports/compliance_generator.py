@@ -70,11 +70,22 @@ def generate_compliance_pdf(
     metadata = get_framework_metadata(
         getattr(config, "selected_framework", "cis_cisco_ios_v1"), config.vendor
     )
+    device = getattr(config, "device", None)
+    management_address = getattr(device, "management_address", None) if device else None
+    model = getattr(device, "model", None) if device else None
+    serial_number = getattr(device, "serial_number", None) if device else None
+    org = getattr(device, "organization", None) if device else None
+    org_name = getattr(org, "name", None) if org else None
+
     html = template.render(
         device_name=config.device_name,
         vendor=config.vendor.upper(),
         os_type=config.os_type.upper(),
         firmware_version=config.firmware_version or "Not detected",
+        management_address=management_address,
+        model=model,
+        serial_number=serial_number,
+        organization_name=org_name,
         framework=metadata.title,
         framework_version=metadata.version,
         completed_at=completed_at.strftime("%-d %B %Y, %H:%M UTC"),

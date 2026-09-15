@@ -147,7 +147,7 @@ def _generate_report(db, config, report, remediations: dict[str, Any] | None = N
 
 
 @app.task(name="tasks.audit_orchestrator.run_config_audit")
-def run_config_audit(config_id: str) -> dict[str, Any]:
+def run_config_audit(config_id: str, allow_ai_proposals: bool = True) -> dict[str, Any]:
     """Normalize, gate, evaluate, remediate, report, and persist one Config."""
     from database import SessionLocal
     from models import Config, ConfigStatus
@@ -184,22 +184,23 @@ def run_config_audit(config_id: str) -> dict[str, Any]:
         normalized = normalizer.parse(config.raw_config)
         if normalized.config.device_info.os_version:
             config.firmware_version = normalized.config.device_info.os_version
-        try:
-            proposals = propose_config_mappings(
-                config.vendor,
-                [
-                    {
-                        "line_number": line.line_number,
-                        "raw_source_line": line.raw_source_line,
-                        "context": line.context,
-                    }
-                    for line in normalized.unknown_lines
-                ],
-                CONFIG_SCHEMA_REFERENCE,
-            )
-        except Exception:
-            logger.exception("Ollama proposal generation failed; manual training remains available")
-            proposals = {}
+        proposals = {}
+        if allow_ai_proposals:
+            try:
+                proposals = propose_config_mappings(
+                    config.vendor,
+                    [
+                        {
+                            "line_number": line.line_number,
+                            "raw_source_line": line.raw_source_line,
+                            "context": line.context,
+                        }
+                        for line in normalized.unknown_lines
+                    ],
+                    CONFIG_SCHEMA_REFERENCE,
+                )
+            except Exception:
+                logger.exception("Ollama proposal generation failed; manual training remains available")
         training_required = _persist_findings(db, config, normalized, proposals)
         if config.status == ConfigStatus.cancelled:
             db.commit()

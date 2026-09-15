@@ -37,5 +37,20 @@ app.conf.update(
     # Dev shortcut: set to True to run tasks synchronously without Redis.
     task_always_eager=False,
     broker_connection_retry_on_startup=True,
-    include=['tasks.audit_orchestrator'],
+    include=['tasks.audit_orchestrator', 'tasks.scheduled_audits', 'tasks.network_missions'],
+    beat_schedule={
+        'poll-due-audit-schedules': {
+            'task': 'tasks.scheduled_audits.poll_due_schedules',
+            'schedule': settings.SCHEDULE_POLL_SECONDS,
+        },
+    },
+    task_routes={
+        'tasks.scheduled_audits.poll_due_schedules': {'queue': 'scheduled_audits'},
+        'tasks.scheduled_audits.run_scheduled_audit': {'queue': 'scheduled_audits'},
+        'tasks.network_missions.run_network_mission': {'queue': 'network_missions'},
+        'tasks.network_missions.collect_mission_device': {'queue': 'network_missions'},
+        'tasks.network_missions.finalize_network_mission': {'queue': 'network_missions'},
+        'tasks.network_missions.execute_campaign_target': {'queue': 'remediation'},
+        'tasks.network_missions.finalize_remediation_campaign': {'queue': 'remediation'},
+    },
 )

@@ -16,6 +16,8 @@ from routers.device_credentials import router as device_credentials_router
 from routers.devices import router as devices_router
 from routers.training import router as training_router
 from routers.organizations import router as organizations_router
+from routers.audit_schedules import router as audit_schedules_router
+from routers.network_missions import router as network_missions_router
 
 # Refuse to boot with default secrets in a production posture (no-op warning for
 # local self-hosted). Runs at import so uvicorn/gunicorn can't skip it.
@@ -96,3 +98,5 @@ app.include_router(training_router)
 app.include_router(devices_router)
 app.include_router(device_credentials_router)
 app.include_router(organizations_router)
+app.include_router(audit_schedules_router)
+app.include_router(network_missions_router)

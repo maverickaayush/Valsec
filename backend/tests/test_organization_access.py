@@ -101,3 +101,32 @@ def test_added_viewer_can_read_device_but_cannot_modify_it(db, monkeypatch):
             device.id, devices.DevicePatch(display_name="forbidden"), None, db,
         )
     assert denied.value.status_code == 404
+
+
+def test_owner_can_enable_dual_control_but_viewer_cannot(db, monkeypatch):
+    owner = User(id=uuid4(), email="policy-owner@example.test", email_verified=True)
+    viewer = User(id=uuid4(), email="policy-viewer@example.test", email_verified=True)
+    org = Organization(id=owner.id, name="Operations", is_personal=False)
+    db.add_all([owner, viewer, org]); db.flush()
+    db.add_all([
+        Membership(user_id=owner.id, org_id=org.id, role=MembershipRole.owner),
+        Membership(user_id=viewer.id, org_id=org.id, role=MembershipRole.viewer),
+    ]); db.commit()
+    monkeypatch.setattr(organizations.settings, "REQUIRE_AUTH", True)
+    monkeypatch.setattr(organizations, "_current_user", lambda *_: viewer)
+    with pytest.raises(HTTPException) as denied:
+        organizations.update_remediation_policy(
+            org.id,
+            organizations.OrganizationPolicyUpdate(require_separate_remediation_approver=True),
+            None,
+            db,
+        )
+    assert denied.value.status_code == 403
+    monkeypatch.setattr(organizations, "_current_user", lambda *_: owner)
+    response = organizations.update_remediation_policy(
+        org.id,
+        organizations.OrganizationPolicyUpdate(require_separate_remediation_approver=True),
+        None,
+        db,
+    )
+    assert response["require_separate_remediation_approver"] is True

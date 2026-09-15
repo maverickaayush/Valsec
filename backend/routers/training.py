@@ -1,4 +1,4 @@
-"""Training API endpoints for operator-approved mapping submission.
+"""Training API endpoints for operator-approved mapping requests.
 
 GET /api/configs/{config_id}/unverified
   Retrieve unverified findings (unknown lines) for a config, ready for operator review.
@@ -137,7 +137,7 @@ def submit_training(
         )
 
     try:
-        # Serialize training submissions for this audit. This protects the final
+        # Serialize training requests for this audit. This protects the final
         # finding transition and ensures only one request claims the resume.
         config = (
             db.query(Config)
@@ -294,7 +294,7 @@ def submit_training(
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail={
-                        "message": "Training was saved but audit resume dispatch failed; retry this submission",
+                        "message": "Training was saved but audit resume dispatch failed; retry this request",
                         "resume_pending": True,
                     },
                 ) from exc
@@ -314,14 +314,14 @@ def submit_training(
         logger.warning("Concurrent learned-mapping conflict for finding %s", finding_id_str)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="The mapping changed concurrently; retry the submission",
+            detail="The mapping changed concurrently; retry the request",
         ) from exc
     except Exception as exc:
         db.rollback()
         logger.exception("Error submitting training for finding %s", finding_id_str)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Training submission failed",
+            detail="Training request failed",
         )
 
 

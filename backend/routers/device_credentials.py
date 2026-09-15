@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from config import settings
 from database import get_db
 from device_ownership import get_device_for_access
-from models import DeviceCredential
+from models import AuditSchedule, DeviceCredential
 from organization_access import OPERATE_ROLES, READ_ROLES
 from secrets import get_secret_backend
 
@@ -128,6 +128,13 @@ def delete_device_credential(
     backend_name = credential.secret_backend
     secret_ref = credential.secret_ref
     revoked_id = credential.id
+    schedule_query = db.query(AuditSchedule).filter(AuditSchedule.credential_id == credential.id)
+    if callable(getattr(schedule_query, "update", None)):
+        schedule_query.update({
+            AuditSchedule.credential_id: None,
+            AuditSchedule.enabled: False,
+            AuditSchedule.last_run_status: "awaiting_credential",
+        }, synchronize_session=False)
     db.delete(credential)
     db.commit()
     try:
