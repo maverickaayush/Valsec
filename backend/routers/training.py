@@ -346,7 +346,7 @@ def _unverified_item(finding: NormalizedFinding) -> dict[str, Any]:
     )
     finding_id = str(finding.id)
     return {
-        "id": finding_id,  # compatibility with the completed Nimbus frontend
+        "id": finding_id,  # compatibility with the existing Valsec frontend
         "finding_id": finding_id,
         "raw_source_line": finding.raw_source_line,
         "line_number": finding.line_number,

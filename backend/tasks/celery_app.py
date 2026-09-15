@@ -33,7 +33,7 @@ app.conf.update(
     # Default bound for audit orchestration and local inference calls.
     task_soft_time_limit=round(300 * settings.INFERENCE_TIMEOUT_MULTIPLIER),
     task_time_limit=round(360 * settings.INFERENCE_TIMEOUT_MULTIPLIER),
-    worker_concurrency=5,
+    worker_concurrency=settings.MAX_CONCURRENT_AUDITS,
     # Dev shortcut: set to True to run tasks synchronously without Redis.
     task_always_eager=False,
     broker_connection_retry_on_startup=True,

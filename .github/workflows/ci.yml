@@ -8,6 +8,22 @@ on:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: valsec_ci
+          POSTGRES_USER: valsec_ci
+          POSTGRES_PASSWORD: valsec_ci_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U valsec_ci -d valsec_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://valsec_ci:valsec_ci_password@127.0.0.1:5432/valsec_ci
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -15,6 +31,12 @@ jobs:
       - run: pip install -r backend/requirements.txt -r backend/requirements-dev.txt
       - name: Compile backend
         run: python -m compileall -q backend migrations
+      - name: Verify migration chain and organization downgrade
+        run: |
+          alembic upgrade e2f6c8a41d90
+          alembic upgrade head
+          alembic downgrade -1
+          alembic upgrade head
       - name: Run Valsec tests
         working-directory: backend
         run: pytest tests -q

@@ -26,6 +26,16 @@ from training.matcher import CONFIG_SCHEMA_REFERENCE, DatabaseLearnedMappingReso
 logger = logging.getLogger(__name__)
 
 
+def _mark_device_audited(config) -> None:
+    """Update durable device timestamps in the audit completion transaction."""
+    device = getattr(config, "device", None)
+    if device is None:
+        return
+    timestamps = [value for value in (device.first_seen_at, config.uploaded_at, config.completed_at) if value]
+    device.first_seen_at = min(timestamps)
+    device.last_audited_at = config.completed_at
+
+
 def _acquire_audit_lock(db, config_id: str):
     """Hold one PostgreSQL advisory lock across the task's intermediate commits."""
     try:
@@ -212,6 +222,7 @@ def run_config_audit(config_id: str) -> dict[str, Any]:
         config.completed_at = datetime.utcnow()
         _generate_report(db, config, report, remediations)
         config.status = ConfigStatus.complete
+        _mark_device_audited(config)
         db.commit()
         return {"status": "complete", "config_id": str(config.id), "score": report.compliance_score}
     except Exception as exc:

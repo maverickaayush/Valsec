@@ -1,4 +1,4 @@
-"""Local-only SSH pull and operator-approved remediation apply endpoints."""
+"""Owned pull/discovery and local-only remediation device-access endpoints."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -25,11 +25,18 @@ from connectors.ssh_push import (
 )
 from connectors.target_guard import TargetResolutionError, UnsafeTargetError, assert_connectable_target
 from database import get_db
+from device_ownership import (
+    acting_device_user, get_device_for_access, get_target_device_for_access,
+)
+from organization_access import OPERATE_ROLES, require_org_role
+from device_registry import link_if_database_session
 from models import (
-    ComplianceResult, Config, ConfigStatus, DiscoverySession,
+    ComplianceResult, Config, ConfigStatus, CredentialAccessLog,
+    DeviceCredential, DiscoverySession,
     DiscoverySessionStatus, DiscoveredDevice, DiscoveredDeviceStatus,
     RemediationAction, RemediationActionStatus,
 )
+from secrets import get_secret_backend
 from routers.configs import (
     _DEFAULT_GENERIC_FRAMEWORK, _VENDOR_OS_TYPES, _validated_vendor,
     get_owned_config_or_404, persist_and_dispatch_configs,
@@ -43,11 +50,50 @@ router = APIRouter(prefix="/api/configs", tags=["device-access"])
 logger = logging.getLogger(__name__)
 
 
-def _require_local_device_access() -> None:
-    # Hosted/authenticated deployments must not become a network pivot. This
-    # feature is deliberately restricted to the local single-operator mode.
+def _require_local_remediation_access() -> None:
+    # Remediation semantics remain deliberately local-only in P1-1.
     if settings.REQUIRE_AUTH:
-        raise HTTPException(status_code=403, detail="Device SSH access is disabled when authentication is required")
+        raise HTTPException(status_code=403, detail="Device remediation access is disabled when authentication is required")
+
+
+def _commit_claim(db, claimed: bool) -> None:
+    if claimed:
+        db.commit()
+
+
+def _stored_ssh_credential(db, device):
+    credential = db.query(DeviceCredential).filter(
+        DeviceCredential.device_id == device.id,
+        DeviceCredential.credential_type == "ssh",
+    ).first()
+    if credential is None:
+        raise HTTPException(status_code=404, detail="Stored SSH credential not found")
+    try:
+        plaintext = get_secret_backend(credential.secret_backend).retrieve(credential.secret_ref)
+    except Exception:
+        raise HTTPException(status_code=503, detail="Credential vault is unavailable") from None
+    return credential.username, plaintext, credential
+
+
+def _record_credential_access(db, credential, user, *, purpose: str) -> None:
+    """Best-effort audit write after a successful connector call."""
+    try:
+        credential.last_used_at = datetime.utcnow()
+        db.add(CredentialAccessLog(
+            credential_id=credential.id,
+            accessed_by_user_id=user.id if user is not None else None,
+            purpose=purpose,
+        ))
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.warning(
+            "Credential access logging failed for credential %s",
+            credential.id,
+        )
 
 
 def _connector_http_error(exc: Exception) -> HTTPException:
@@ -60,10 +106,12 @@ def _connector_http_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=502, detail="Device management operation failed")
 
 
-def _session_or_404(db: Session, session_id: UUID) -> DiscoverySession:
+def _session_or_404(db: Session, session_id: UUID, user=None) -> DiscoverySession:
     session = db.query(DiscoverySession).filter(DiscoverySession.id == session_id).first()
     if session is None:
         raise HTTPException(status_code=404, detail="Discovery session not found")
+    if user is not None:
+        require_org_role(db, user, session.user_id, OPERATE_ROLES)
     return session
 
 
@@ -93,6 +141,7 @@ def _device_response(device: DiscoveredDevice) -> dict:
         "status": device.status.value,
         "error_message": device.error_message,
         "config_id": device.config_id,
+        "device_id": config.device_id if config is not None else None,
         "audit_status": config.status.value if config is not None else None,
     }
 
@@ -132,7 +181,8 @@ def _pull_with_profile(*, address: str, port: int, username: str, password: str,
 
 
 def _create_discovered_config(db: Session, device: DiscoveredDevice, *, raw_config: str,
-                              vendor: str, framework: str, device_name: str) -> None:
+                              vendor: str, framework: str, device_name: str,
+                              user=None) -> None:
     if not raw_config.strip():
         raise DeviceUnreachableError("Discovered device returned an empty configuration")
     config = Config(
@@ -142,7 +192,11 @@ def _create_discovered_config(db: Session, device: DiscoveredDevice, *, raw_conf
         raw_config=raw_config,
         selected_framework=_validated_discovery_framework(framework, vendor),
         status=ConfigStatus.queued,
-        user_id=None,
+        user_id=user.id if user is not None else None,
+    )
+    link_if_database_session(
+        db, config, org_id=device.session.user_id if user is not None else None,
+        management_address=device.address,
     )
     device.status = DiscoveredDeviceStatus.pulling
     db.commit()
@@ -173,12 +227,28 @@ def _finish_discovery_session(db: Session, session: DiscoverySession) -> None:
 
 
 @router.post("/discover-neighbors")
-def discover_neighbors(request: SeedDiscoveryRequest):
+def discover_neighbors(
+    request: SeedDiscoveryRequest,
+    http_request: Request = None,
+    db: Session = Depends(get_db),
+):
     """Return candidates passively observed by an authenticated seed device."""
-    _require_local_device_access()
+    user = acting_device_user(http_request, db)
+    seed_host = request.host
+    if user is not None:
+        try:
+            seed_host = assert_connectable_target(request.host)
+        except (UnsafeTargetError, TargetResolutionError, DeviceUnreachableError) as exc:
+            raise _connector_http_error(exc) from exc
+        _, claimed = get_target_device_for_access(
+            db, user, vendor=_validated_vendor(request.vendor),
+            os_type=_VENDOR_OS_TYPES.get(request.vendor.casefold(), "unknown"),
+            display_name=request.host, management_address=seed_host,
+        )
+        _commit_claim(db, claimed)
     try:
         neighbors = discover_seed_neighbors(
-            request.host, request.port, request.username,
+            seed_host, request.port, request.username,
             request.password.get_secret_value(),
             8.0, request.vendor,
         )
@@ -192,13 +262,17 @@ def discover_neighbors(request: SeedDiscoveryRequest):
 
 
 @router.post("/discovery-sessions", status_code=202)
-def start_discovery_session(request: DiscoverySessionRequest, db: Session = Depends(get_db)):
+def start_discovery_session(
+    request: DiscoverySessionRequest,
+    db: Session = Depends(get_db),
+    http_request: Request = None,
+):
     """Discover breadth-first and immediately pull neighbors that are safe to infer.
 
     Request credentials exist only for this synchronous orchestration call. They
     are never written to the discovery records or queued in Celery.
     """
-    _require_local_device_access()
+    user = acting_device_user(http_request, db)
     if request.framework not in FRAMEWORKS:
         raise HTTPException(status_code=422, detail="Unsupported compliance framework")
     max_depth = min(request.max_depth, settings.DISCOVERY_MAX_DEPTH)
@@ -207,13 +281,24 @@ def start_discovery_session(request: DiscoverySessionRequest, db: Session = Depe
         pinned_seed = assert_connectable_target(request.seed.host)
     except (UnsafeTargetError, TargetResolutionError, DeviceUnreachableError) as exc:
         raise _connector_http_error(exc) from exc
+    seed_registry_device = None
+    if user is not None:
+        seed_registry_device, claimed = get_target_device_for_access(
+            db, user, vendor=_validated_vendor(request.seed.vendor),
+            os_type=_VENDOR_OS_TYPES.get(request.seed.vendor.casefold(), "unknown"),
+            display_name=request.seed.host, management_address=pinned_seed,
+        )
+        _commit_claim(db, claimed)
     session = DiscoverySession(
         seed_host=pinned_seed,
         seed_vendor=request.seed.vendor,
         status=DiscoverySessionStatus.running,
         max_depth=max_depth,
         max_devices=max_devices,
-        user_id=None,
+        # Personal organization IDs intentionally equal their owning User ID.
+        # This retains the existing FK while allowing organization members to
+        # continue processing the same discovery session.
+        user_id=seed_registry_device.org_id if user is not None else None,
     )
     db.add(session)
     db.commit()
@@ -233,7 +318,7 @@ def start_discovery_session(request: DiscoverySessionRequest, db: Session = Depe
                 parent_address, request.seed.port, credentials[0], credentials[1],
                 seed_vendor=parent_vendor,
             )
-        except (DeviceAuthError, DeviceUnreachableError, UnsafeTargetError) as exc:
+        except (DeviceAuthError, DeviceUnreachableError, UnsafeTargetError, TargetResolutionError) as exc:
             if parent_depth == 0:
                 initial_error = exc
             continue
@@ -281,6 +366,15 @@ def start_discovery_session(request: DiscoverySessionRequest, db: Session = Depe
                 continue
             vendor = _validated_vendor(inferred_vendor)
             try:
+                if user is not None:
+                    _, claimed = get_target_device_for_access(
+                        db, user, vendor=vendor,
+                        os_type=_VENDOR_OS_TYPES.get(vendor.casefold(), "unknown"),
+                        display_name=candidate.system_name or f"discovered-{pinned_address}",
+                        management_address=pinned_address,
+                        organization_id=session.user_id,
+                    )
+                    _commit_claim(db, claimed)
                 raw_config = _pull_with_profile(
                     address=pinned_address,
                     port=22,
@@ -293,6 +387,7 @@ def start_discovery_session(request: DiscoverySessionRequest, db: Session = Depe
                     db, device, raw_config=raw_config, vendor=vendor,
                     framework=request.framework,
                     device_name=candidate.system_name or f"discovered-{pinned_address}",
+                    user=user,
                 )
                 if depth < max_depth:
                     queue.append((pinned_address, vendor, depth))
@@ -316,9 +411,13 @@ def start_discovery_session(request: DiscoverySessionRequest, db: Session = Depe
 
 
 @router.get("/discovery-sessions/{session_id}")
-def get_discovery_session(session_id: UUID, db: Session = Depends(get_db)):
-    _require_local_device_access()
-    return _session_response(_session_or_404(db, session_id))
+def get_discovery_session(
+    session_id: UUID,
+    db: Session = Depends(get_db),
+    http_request: Request = None,
+):
+    user = acting_device_user(http_request, db)
+    return _session_response(_session_or_404(db, session_id, user))
 
 
 @router.post("/discovery-sessions/{session_id}/devices/{device_id}/process", status_code=202)
@@ -327,10 +426,11 @@ def process_discovered_device(
     device_id: UUID,
     request: DiscoveryDeviceProcessRequest,
     db: Session = Depends(get_db),
+    http_request: Request = None,
 ):
     """Supply only the missing profile/credentials for a persisted candidate."""
-    _require_local_device_access()
-    session = _session_or_404(db, session_id)
+    user = acting_device_user(http_request, db)
+    session = _session_or_404(db, session_id, user)
     device = _device_or_404(db, session_id, device_id)
     if device.config_id is not None:
         raise HTTPException(status_code=409, detail="Discovered device already has an audit")
@@ -340,6 +440,15 @@ def process_discovered_device(
         pinned = assert_connectable_target(device.address)
         if pinned != device.address:
             raise UnsafeTargetError("Discovered address did not resolve to its recorded target")
+        if user is not None:
+            _, claimed = get_target_device_for_access(
+                db, user, vendor=vendor,
+                os_type=_VENDOR_OS_TYPES.get(vendor.casefold(), "unknown"),
+                display_name=request.device_name,
+                management_address=pinned,
+                organization_id=session.user_id,
+            )
+            _commit_claim(db, claimed)
         raw_config = _pull_with_profile(
             address=pinned,
             port=request.port,
@@ -351,6 +460,7 @@ def process_discovered_device(
         _create_discovered_config(
             db, device, raw_config=raw_config, vendor=vendor,
             framework=request.framework, device_name=request.device_name,
+            user=user,
         )
     except HTTPException:
         raise
@@ -365,10 +475,15 @@ def process_discovered_device(
 
 
 @router.post("/discovery-sessions/{session_id}/devices/{device_id}/skip")
-def skip_discovered_device(session_id: UUID, device_id: UUID, db: Session = Depends(get_db)):
+def skip_discovered_device(
+    session_id: UUID,
+    device_id: UUID,
+    db: Session = Depends(get_db),
+    http_request: Request = None,
+):
     """Dismiss passive host evidence that the operator knows is not a router."""
-    _require_local_device_access()
-    session = _session_or_404(db, session_id)
+    user = acting_device_user(http_request, db)
+    session = _session_or_404(db, session_id, user)
     device = _device_or_404(db, session_id, device_id)
     if device.config_id is not None:
         raise HTTPException(status_code=409, detail="A device with an audit cannot be skipped")
@@ -383,10 +498,22 @@ def skip_discovered_device(session_id: UUID, device_id: UUID, db: Session = Depe
 @router.post("/pull-discovered-device", status_code=202)
 def pull_discovered_device(request: DiscoveredDevicePullRequest, http_request: Request, db: Session = Depends(get_db)):
     """Revalidate a selected seed neighbor, pull it, and reuse audit ingestion."""
-    _require_local_device_access()
+    user = acting_device_user(http_request, db)
+    seed_host = request.seed.host
+    if user is not None:
+        try:
+            seed_host = assert_connectable_target(request.seed.host)
+        except (UnsafeTargetError, TargetResolutionError, DeviceUnreachableError) as exc:
+            raise _connector_http_error(exc) from exc
+        seed_registry_device, claimed = get_target_device_for_access(
+            db, user, vendor=_validated_vendor(request.seed.vendor),
+            os_type=_VENDOR_OS_TYPES.get(request.seed.vendor.casefold(), "unknown"),
+            display_name=request.seed.host, management_address=seed_host,
+        )
+        _commit_claim(db, claimed)
     try:
         candidates = discover_seed_neighbors(
-            request.seed.host, request.seed.port, request.seed.username,
+            seed_host, request.seed.port, request.seed.username,
             request.seed.password.get_secret_value(),
             8.0, request.seed.vendor,
         )
@@ -398,17 +525,26 @@ def pull_discovered_device(request: DiscoveredDevicePullRequest, http_request: R
 
     requested_vendor = request.vendor
     if request.transport == "telnet":
-        # The only legacy Telnet profile implemented is the observed Cirotech
+        # The only Telnet profile implemented is the observed Cirotech
         # appliance. No operator-supplied command ever reaches the session.
         if requested_vendor.casefold() not in {"auto", "cirotech"}:
             raise HTTPException(status_code=422, detail="Telnet pull currently supports only the fixed Cirotech profile")
         vendor = "Cirotech"
         try:
+            pinned_address = assert_connectable_target(request.address)
+            if user is not None:
+                registry_device, claimed = get_target_device_for_access(
+                    db, user, vendor=vendor, os_type="embedded-linux",
+                    display_name=request.device_name,
+                    management_address=pinned_address,
+                    organization_id=seed_registry_device.org_id,
+                )
+                _commit_claim(db, claimed)
             raw_config = fetch_cirotech_config(
-                request.address, request.port, request.username,
+                pinned_address, request.port, request.username,
                 request.password.get_secret_value(),
             )
-        except (DeviceAuthError, DeviceUnreachableError, UnsafeTargetError) as exc:
+        except (DeviceAuthError, DeviceUnreachableError, UnsafeTargetError, TargetResolutionError) as exc:
             raise _connector_http_error(exc) from exc
     else:
         vendor_hint = candidate.vendor_hint
@@ -422,11 +558,21 @@ def pull_discovered_device(request: DiscoveredDevicePullRequest, http_request: R
         else:
             vendor = _validated_vendor(requested_vendor)
         try:
+            pinned_address = assert_connectable_target(request.address)
+            if user is not None:
+                registry_device, claimed = get_target_device_for_access(
+                    db, user, vendor=vendor,
+                    os_type=_VENDOR_OS_TYPES.get(vendor.casefold(), "unknown"),
+                    display_name=request.device_name,
+                    management_address=pinned_address,
+                    organization_id=seed_registry_device.org_id,
+                )
+                _commit_claim(db, claimed)
             raw_config = fetch_device_config(
-                request.address, request.port, request.username,
+                pinned_address, request.port, request.username,
                 request.password.get_secret_value(), vendor,
             )
-        except (DeviceAuthError, DeviceUnreachableError, UnsafeTargetError) as exc:
+        except (DeviceAuthError, DeviceUnreachableError, UnsafeTargetError, TargetResolutionError) as exc:
             raise _connector_http_error(exc) from exc
     if not raw_config.strip():
         raise HTTPException(status_code=502, detail="Discovered device returned an empty configuration")
@@ -441,13 +587,18 @@ def pull_discovered_device(request: DiscoveredDevicePullRequest, http_request: R
         raw_config=raw_config,
         selected_framework=request.framework,
         status=ConfigStatus.queued,
-        user_id=None,
+        user_id=user.id if user is not None else None,
+    )
+    link_if_database_session(
+        db, config, org_id=registry_device.org_id if user is not None else None,
+        management_address=pinned_address,
     )
     dispatch_errors = persist_and_dispatch_configs(db, [config])
     response = {
         "config_id": config.id, "status": config.status.value,
         "device_name": config.device_name, "vendor": config.vendor,
         "os_type": config.os_type, "selected_framework": config.selected_framework,
+        "device_id": config.device_id,
         "discovered_from": request.seed.host,
         "discovery_sources": candidate.sources,
     }
@@ -456,7 +607,9 @@ def pull_discovered_device(request: DiscoveredDevicePullRequest, http_request: R
 
 @router.post("/pull-device", status_code=202)
 def pull_device(request: DevicePullRequest, http_request: Request, db: Session = Depends(get_db)):
-    _require_local_device_access()
+    use_stored = bool(getattr(request, "use_stored_credential", False))
+    if use_stored and not settings.ENABLE_CREDENTIAL_VAULT:
+        raise HTTPException(status_code=404, detail="Not found")
     vendor = _validated_vendor(request.vendor)
     if request.framework not in FRAMEWORKS:
         raise HTTPException(status_code=422, detail="Unsupported compliance framework")
@@ -464,12 +617,44 @@ def pull_device(request: DevicePullRequest, http_request: Request, db: Session =
         raise HTTPException(status_code=422, detail="The CIS catalogue is vendor-specific; choose a vendor-neutral framework")
     if vendor == "fortinet" and request.framework != _DEFAULT_GENERIC_FRAMEWORK:
         raise HTTPException(status_code=422, detail="Fortinet FortiOS currently supports nist_sp_800_53_rev5")
+    credential = None
+    plaintext_password = None
     try:
-        raw_config = fetch_device_config(
-            request.host, request.port, request.username,
-            request.password.get_secret_value(), vendor,
-        )
-    except (DeviceAuthError, DeviceUnreachableError, UnsafeTargetError) as exc:
+        pinned_address = assert_connectable_target(request.host)
+        if use_stored:
+            device, user, claimed = get_device_for_access(request.device_id, http_request, db)
+            _commit_claim(db, claimed)
+            if (
+                device.management_address != pinned_address
+                or device.vendor.casefold() != vendor.casefold()
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Stored credential device does not match the requested target",
+                )
+            username, plaintext_password, credential = _stored_ssh_credential(db, device)
+        else:
+            user = acting_device_user(http_request, db)
+            if user is not None:
+                registry_device, claimed = get_target_device_for_access(
+                    db, user, vendor=vendor,
+                    os_type=_VENDOR_OS_TYPES.get(vendor, "unknown"),
+                    display_name=request.device_name,
+                    management_address=pinned_address,
+                )
+                _commit_claim(db, claimed)
+            username = request.username
+            plaintext_password = request.password.get_secret_value()
+        try:
+            raw_config = fetch_device_config(
+                pinned_address, request.port, username,
+                plaintext_password, vendor,
+            )
+        finally:
+            plaintext_password = None
+    except HTTPException:
+        raise
+    except (DeviceAuthError, DeviceUnreachableError, UnsafeTargetError, TargetResolutionError) as exc:
         raise _connector_http_error(exc) from exc
     if not raw_config.strip():
         raise HTTPException(status_code=502, detail="Device returned an empty configuration")
@@ -480,9 +665,15 @@ def pull_device(request: DevicePullRequest, http_request: Request, db: Session =
         raw_config=raw_config,
         selected_framework=request.framework,
         status=ConfigStatus.queued,
-        user_id=None,
+        user_id=user.id if user is not None else None,
+    )
+    link_if_database_session(
+        db, config, org_id=(device.org_id if use_stored else registry_device.org_id) if user is not None else None,
+        management_address=pinned_address,
     )
     dispatch_errors = persist_and_dispatch_configs(db, [config])
+    if credential is not None:
+        _record_credential_access(db, credential, user, purpose="manual_pull")
     response = {
         "config_id": config.id,
         "status": config.status.value,
@@ -490,6 +681,7 @@ def pull_device(request: DevicePullRequest, http_request: Request, db: Session =
         "vendor": config.vendor,
         "os_type": config.os_type,
         "selected_framework": config.selected_framework,
+        "device_id": config.device_id,
     }
     return {**response, "configs": [response], "dispatch_errors": dispatch_errors}
 
@@ -503,7 +695,7 @@ def _finding_for_update(db: Session, config_id: UUID, finding_id: UUID) -> Compl
 
 @router.post("/{config_id}/findings/{finding_id}/approve-remediation")
 def approve_remediation(config_id: UUID, finding_id: UUID, http_request: Request, db: Session = Depends(get_db)):
-    _require_local_device_access()
+    _require_local_remediation_access()
     config = get_owned_config_or_404(config_id, http_request, db)
     finding = _finding_for_update(db, config.id, finding_id)
     if finding is None:
@@ -541,7 +733,7 @@ def apply_approved_remediation(
     http_request: Request,
     db: Session = Depends(get_db),
 ):
-    _require_local_device_access()
+    _require_local_remediation_access()
     config = get_owned_config_or_404(config_id, http_request, db)
     finding = _finding_for_update(db, config.id, finding_id)
     if finding is None:

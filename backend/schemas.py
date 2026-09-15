@@ -1,6 +1,6 @@
 from typing import Literal
 from uuid import UUID
-from pydantic import BaseModel, SecretStr, Field, field_validator
+from pydantic import BaseModel, SecretStr, Field, field_validator, model_validator
 import validators
 from input_validation import validate_device_name
 
@@ -44,15 +44,27 @@ class AuthUserResponse(BaseModel):
 class DevicePullRequest(BaseModel):
     host: str = Field(min_length=1, max_length=253)
     port: int = Field(default=22, ge=1, le=65535)
-    username: str = Field(min_length=1, max_length=128)
-    password: SecretStr
+    username: str | None = Field(default=None, min_length=1, max_length=128)
+    password: SecretStr | None = None
     vendor: str = Field(min_length=1, max_length=64)
     framework: str
     device_name: str
+    use_stored_credential: bool = False
+    device_id: UUID | None = None
 
-    @field_validator("host", "username", "vendor")
+    @field_validator("host", "vendor")
     @classmethod
     def trim_printable(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized or any(ord(character) < 32 for character in normalized):
+            raise ValueError("Value must contain printable characters")
+        return normalized
+
+    @field_validator("username")
+    @classmethod
+    def trim_optional_username(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         normalized = value.strip()
         if not normalized or any(ord(character) < 32 for character in normalized):
             raise ValueError("Value must contain printable characters")
@@ -62,6 +74,15 @@ class DevicePullRequest(BaseModel):
     @classmethod
     def device_name_is_valid(cls, value: str) -> str:
         return validate_device_name(value)
+
+    @model_validator(mode="after")
+    def validate_credential_source(self):
+        if self.use_stored_credential:
+            if self.device_id is None:
+                raise ValueError("device_id is required when use_stored_credential is true")
+        elif self.username is None or self.password is None:
+            raise ValueError("username and password are required for a manual pull")
+        return self
 
 
 class SeedDiscoveryRequest(BaseModel):

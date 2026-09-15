@@ -40,6 +40,8 @@ services:
       DATABASE_URL: postgresql://valsec:${POSTGRES_PASSWORD:-valsec_local_change_me}@postgres:5432/valsec
       REDIS_URL: redis://redis:6379/0
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      ENABLE_CREDENTIAL_VAULT: ${ENABLE_CREDENTIAL_VAULT:-false}
+      CREDENTIAL_VAULT_KEY: ${CREDENTIAL_VAULT_KEY:-}
       SECRET_KEY: ${SECRET_KEY:-change_me_in_production}
       VALSEC_ENV: ${VALSEC_ENV:-development}
     extra_hosts:
@@ -47,23 +49,37 @@ services:
     ports:
       - "8000:8000"
     command: sh -c "cd /app && alembic upgrade head && cd /app/backend && uvicorn main:app --host 0.0.0.0 --port 8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
   worker:
     build:
       context: .
       dockerfile: backend/Dockerfile
     restart: unless-stopped
     depends_on:
-      backend: {condition: service_started}
+      backend: {condition: service_healthy}
     environment:
       PYTHONPATH: /app/backend
       DATABASE_URL: postgresql://valsec:${POSTGRES_PASSWORD:-valsec_local_change_me}@postgres:5432/valsec
       REDIS_URL: redis://redis:6379/0
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      ENABLE_CREDENTIAL_VAULT: ${ENABLE_CREDENTIAL_VAULT:-false}
+      CREDENTIAL_VAULT_KEY: ${CREDENTIAL_VAULT_KEY:-}
       SECRET_KEY: ${SECRET_KEY:-change_me_in_production}
       VALSEC_ENV: ${VALSEC_ENV:-development}
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    command: celery -A tasks.celery_app worker --loglevel=info -c 5
+    command: celery -A tasks.celery_app worker --loglevel=info
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A tasks.celery_app inspect ping -d celery@$$HOSTNAME --timeout=5 | grep -q pong"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
   frontend:
     build:
       context: ./frontend
@@ -77,6 +93,12 @@ services:
       NEXT_INTERNAL_API_URL: http://backend:8000
     ports:
       - "3000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
 volumes:
   postgres_data:
   redis_data:

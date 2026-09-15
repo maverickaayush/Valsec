@@ -4,6 +4,9 @@
 # Then:  cd backend && python3 -m pytest tests/ -v
 -r requirements.txt
 pytest>=8.0
+# FastAPI/Starlette's TestClient imports httpx directly. Keep it explicit so a
+# clean test/CI environment can collect router tests without installing extras.
+httpx>=0.27,<1
 # Report tests parse the generated PDF back to text to assert on its content
 # (XSS escaping, confidence badges, tier/priority sort order). Without this the
 # 8 TestGeneratePdf/TestHtmlEscaping/TestConfidenceDisplay tests error out at

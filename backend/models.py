@@ -2,7 +2,8 @@ import uuid
 from datetime import datetime
 from sqlalchemy import (
     Column, String, Boolean, Integer, Enum as SAEnum,
-    DateTime, LargeBinary, ForeignKey, Text, UniqueConstraint, Float, Index, text
+    DateTime, LargeBinary, ForeignKey, Text, UniqueConstraint, Float, Index,
+    CheckConstraint, text
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
@@ -38,6 +39,12 @@ class ComplianceSeverity(str, enum.Enum):
     Medium = "Medium"
     Low = "Low"
     Informational = "Informational"
+
+
+class MembershipRole(str, enum.Enum):
+    owner = "owner"
+    operator = "operator"
+    viewer = "viewer"
 
 
 class RemediationActionStatus(str, enum.Enum):
@@ -86,6 +93,35 @@ class User(Base):
 
     providers = relationship("AuthProvider", back_populates="user",
                              cascade="all, delete-orphan")
+    memberships = relationship("Membership", back_populates="user", cascade="all, delete-orphan")
+
+
+class Organization(Base):
+    __tablename__ = "organizations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String(255), nullable=False)
+    is_personal = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=True, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    memberships = relationship("Membership", back_populates="organization", cascade="all, delete-orphan")
+    devices = relationship("Device", back_populates="organization")
+
+
+class Membership(Base):
+    __tablename__ = "memberships"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    org_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    role = Column(SAEnum(MembershipRole, name="membership_role"), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    user = relationship("User", back_populates="memberships")
+    organization = relationship("Organization", back_populates="memberships")
+
+    __table_args__ = (UniqueConstraint("user_id", "org_id", name="uq_memberships_user_org"),)
 
 
 class AuthProvider(Base):
@@ -112,6 +148,108 @@ class AuthProvider(Base):
     )
 
 
+class Device(Base):
+    """Durable fleet identity shared by a device's configuration audits."""
+    __tablename__ = "devices"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    org_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True)
+    site = Column(String(255), nullable=True)
+    display_name = Column(String(255), nullable=False)
+    vendor = Column(String(64), nullable=False)
+    os_type = Column(String(64), nullable=False)
+    management_address = Column(String(253), nullable=True)
+    asset_tag = Column(String(128), nullable=True)
+    tags = Column(JSONB, nullable=False, default=dict)
+    is_active = Column(Boolean, nullable=False, default=True)
+    baseline_config_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("configs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    first_seen_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    last_audited_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=True, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    configs = relationship(
+        "Config", back_populates="device", foreign_keys="Config.device_id",
+    )
+    baseline_config = relationship(
+        "Config", foreign_keys=[baseline_config_id], post_update=True,
+    )
+    credentials = relationship(
+        "DeviceCredential", back_populates="device", cascade="all, delete-orphan",
+    )
+    organization = relationship("Organization", back_populates="devices")
+
+    __table_args__ = (
+        Index(
+            "uq_devices_vendor_management_address",
+            "vendor", "management_address",
+            unique=True,
+            postgresql_where=text("management_address IS NOT NULL"),
+        ),
+        Index("ix_devices_vendor_display_name", "vendor", "display_name"),
+        Index("ix_devices_org_active", "org_id", "is_active"),
+        Index("ix_devices_last_audited_at", "last_audited_at"),
+    )
+
+
+class DeviceCredential(Base):
+    """Metadata plus an opaque secret-backend reference; never plaintext."""
+    __tablename__ = "device_credentials"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    device_id = Column(
+        UUID(as_uuid=True), ForeignKey("devices.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    credential_type = Column(String(16), nullable=False)
+    username = Column(String(128), nullable=False)
+    secret_backend = Column(String(64), nullable=False, default="local_encrypted")
+    secret_ref = Column(Text, nullable=False)
+    created_by_user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+    )
+    rotation_required = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=True, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_used_at = Column(DateTime, nullable=True)
+
+    device = relationship("Device", back_populates="credentials")
+    access_logs = relationship(
+        "CredentialAccessLog", back_populates="credential", cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("device_id", "credential_type", name="uq_device_credentials_device_type"),
+        CheckConstraint(
+            "credential_type IN ('ssh', 'telnet')",
+            name="ck_device_credentials_type",
+        ),
+    )
+
+
+class CredentialAccessLog(Base):
+    """Append-only record of server-side credential use."""
+    __tablename__ = "credential_access_log"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    credential_id = Column(
+        UUID(as_uuid=True), ForeignKey("device_credentials.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    accessed_by_user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+    )
+    purpose = Column(String(64), nullable=False)
+    accessed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    credential = relationship("DeviceCredential", back_populates="access_logs")
+
+
 class Config(Base):
     """Uploaded device configuration and its audit lifecycle state.
 
@@ -134,6 +272,7 @@ class Config(Base):
     total_failed = Column(Integer, nullable=False, default=0)
     total_na = Column(Integer, nullable=False, default=0)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
+    device_id = Column(UUID(as_uuid=True), ForeignKey("devices.id", ondelete="SET NULL"), nullable=True, index=True)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
     completed_at = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=True)
@@ -142,6 +281,12 @@ class Config(Base):
     compliance_results = relationship("ComplianceResult", back_populates="config", cascade="all, delete-orphan")
     report = relationship("Report", back_populates="config", uselist=False, cascade="all, delete-orphan")
     discovery_device = relationship("DiscoveredDevice", back_populates="config", uselist=False)
+    device = relationship("Device", back_populates="configs", foreign_keys=[device_id])
+
+    __table_args__ = (
+        Index("ix_configs_device_status_completed_at", "device_id", "status", "completed_at"),
+        Index("ix_configs_device_uploaded_at", "device_id", "uploaded_at"),
+    )
 
 
 class DiscoverySession(Base):

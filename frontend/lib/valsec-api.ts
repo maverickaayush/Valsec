@@ -14,6 +14,7 @@ export type FrameworkKey = 'cis_cisco_ios_v1' | 'nist_sp_800_53_rev5' | 'disa_st
 
 export interface ConfigListItem {
   id: string
+  device_id?: string | null
   device_name: string
   vendor: string
   os_type: string
@@ -37,12 +38,14 @@ export interface ConfigListResponse {
 
 export interface UploadedConfig {
   config_id: string
+  device_id?: string | null
   status: ConfigStatus
   device_name: string
 }
 
 export interface UploadResponse {
   config_id?: string
+  device_id?: string | null
   status?: ConfigStatus
   device_name?: string
   configs: UploadedConfig[]
@@ -52,6 +55,7 @@ export interface UploadResponse {
 
 export interface ConfigStatusResponse {
   config_id: string
+  device_id?: string | null
   status: ConfigStatus
   progress: number
   unverified_count: number
@@ -89,11 +93,13 @@ export interface RemediationActionSummary {
 export interface DevicePullRequest {
   host: string
   port: number
-  username: string
-  password: string
+  username?: string
+  password?: string
   vendor: ConfigVendor
   framework: FrameworkKey
   device_name: string
+  use_stored_credential?: boolean
+  device_id?: string
 }
 
 export interface SeedDiscoveryRequest {
@@ -136,6 +142,7 @@ export interface DiscoveryDevice {
   status: DiscoveryDeviceStatus
   error_message: string | null
   config_id: string | null
+  device_id?: string | null
   audit_status: ConfigStatus | null
 }
 
@@ -202,6 +209,7 @@ export interface RemediationApplyResponse {
 
 export interface ConfigResultsResponse {
   config_id: string
+  device_id?: string | null
   status: ConfigStatus
   compliance_score: number | null
   total_passed: number
@@ -245,6 +253,98 @@ export interface TrainingResponse {
   finding_id: string
   remaining_unverified: number
   audit_resumed: boolean
+}
+
+export interface DeviceInventoryItem {
+  id: string
+  org_id: string | null
+  site: string | null
+  display_name: string
+  vendor: string
+  os_type: string
+  management_address: string | null
+  asset_tag: string | null
+  tags: Record<string, unknown>
+  is_active: boolean
+  baseline_config_id: string | null
+  first_seen_at: string
+  last_audited_at: string | null
+  created_at: string
+  updated_at: string | null
+  status: ConfigStatus | null
+  compliance_score: number | null
+  framework: FrameworkKey | null
+}
+
+export interface DeviceListResponse {
+  items: DeviceInventoryItem[]
+  page: number
+  page_size: number
+  total: number
+}
+
+export interface DeviceHistoryItem {
+  id: string
+  uploaded_at: string
+  completed_at: string | null
+  status: ConfigStatus
+  compliance_score: number | null
+  framework: FrameworkKey
+}
+
+export interface DeviceHistoryResponse {
+  device_id: string
+  items: DeviceHistoryItem[]
+  total: number
+}
+
+export interface ControlDelta {
+  control_id: string
+  title: string
+  severity: ComplianceSeverity
+  previous_verdict: Verdict | null
+  current_verdict: Verdict
+  changed: boolean
+}
+
+export interface DriftReport {
+  baseline_config_id: string | null
+  compare_config_id: string
+  score_before: number | null
+  score_after: number
+  newly_failed: ControlDelta[]
+  newly_passed: ControlDelta[]
+  still_failing: ControlDelta[]
+  unchanged_count: number
+  raw_config_diff: string
+}
+
+export interface FleetSummary {
+  devices_by_status: Record<ConfigStatus, number>
+  average_score: number | null
+  score_distribution: Record<'0-49' | '50-79' | '80-100' | 'unscored', number>
+  top_failing_controls: Array<{
+    control_id: string
+    framework: string
+    title: string
+    failure_count: number
+  }>
+  stale_devices: Array<{
+    id: string
+    display_name: string
+    vendor: string
+    last_audited_at: string | null
+  }>
+  stale_device_count: number
+  stale_since_days: number
+}
+
+export interface DevicePatch {
+  display_name?: string
+  site?: string | null
+  asset_tag?: string | null
+  tags?: Record<string, unknown>
+  is_active?: boolean
 }
 
 export class ValsecApiError extends Error {
@@ -386,4 +486,52 @@ export async function applyRemediation(
 
 export function configReportUrl(id: string): string {
   return `/api/configs/${id}/report`
+}
+
+export async function getDevices(params: {
+  page?: number
+  page_size?: number
+  site?: string
+  vendor?: string
+  status?: ConfigStatus
+  is_active?: boolean
+  stale_since_days?: number
+} = {}): Promise<DeviceListResponse> {
+  const query = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined) query.set(key, String(value))
+  }
+  return handle<DeviceListResponse>(await fetch(`/api/devices?${query}`, { cache: 'no-store' }))
+}
+
+export async function getDevice(id: string): Promise<DeviceInventoryItem> {
+  return handle<DeviceInventoryItem>(await fetch(`/api/devices/${id}`, { cache: 'no-store' }))
+}
+
+export async function patchDevice(id: string, changes: DevicePatch): Promise<DeviceInventoryItem> {
+  return handle<DeviceInventoryItem>(await fetch(`/api/devices/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(changes),
+  }))
+}
+
+export async function getDeviceHistory(id: string): Promise<DeviceHistoryResponse> {
+  return handle<DeviceHistoryResponse>(await fetch(`/api/devices/${id}/history`, { cache: 'no-store' }))
+}
+
+export async function setDeviceBaseline(id: string, configId: string): Promise<{ device_id: string; baseline_config_id: string }> {
+  return handle(await fetch(`/api/devices/${id}/baseline`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config_id: configId }),
+  }))
+}
+
+export async function getDeviceDrift(
+  id: string,
+  params: { baseline_config_id?: string; compare_config_id?: string } = {},
+): Promise<DriftReport> {
+  const query = new URLSearchParams(params)
+  return handle<DriftReport>(await fetch(`/api/devices/${id}/drift?${query}`, { cache: 'no-store' }))
+}
+
+export async function getFleetSummary(staleSinceDays = 30): Promise<FleetSummary> {
+  return handle<FleetSummary>(await fetch(`/api/fleet/summary?stale_since_days=${staleSinceDays}`, { cache: 'no-store' }))
 }

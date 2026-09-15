@@ -1,6 +1,6 @@
-# Valsec
+# Valsec — AI-Driven Multi-Vendor Network Security Compliance Auditor
 
-Valsec is a local-first network-device configuration compliance auditor built for SIH 2026 (SIH26155). It normalizes Cisco IOS/IOS-XE, Juniper JunOS, and Fortinet FortiOS configurations into one vendor-neutral schema, evaluates deterministic framework rules, generates vendor CLI remediation, and produces a Valsec PDF report.
+Valsec is a local-first, AI-driven multi-vendor network security compliance auditor built for SIH 2026 (SIH26155). It normalizes Cisco IOS/IOS-XE, Juniper JunOS, and Fortinet FortiOS configurations into one vendor-neutral schema, evaluates deterministic framework rules, generates vendor CLI remediation, and produces a Valsec PDF report.
 
 Valsec supports routers, switches, and firewalls through Cisco, Juniper, and Fortinet adapters. An unsupported vendor can be onboarded without a parser: Valsec preserves its vendor identifier, proposes schema mappings with local Ollama, requires operator approval, and reuses approved mappings only for the same user and vendor.
 
@@ -17,10 +17,13 @@ AI can propose schema mappings and remediation text. It cannot determine PASS, F
 - Deterministic CIS Cisco IOS (23 controls), CIS Juniper (11 controls), NIST SP 800-53 Rev. 5 (8 neutral controls and 7 Fortinet controls), DISA Network Device STIG V1R1 (6 controls), and ISO/IEC 27001:2022 Annex A (6 controls).
 - Deterministic Cisco, Juniper, and FortiOS remediation where a template exists; validated local Ollama fallback is explicitly marked for review.
 - Valsec-branded PDF with device identity, framework, score, verdicts, severity, evidence, requirements, and remediation.
-- Nimbus-derived dashboard connected to the real FastAPI endpoints.
+- Valsec dashboard connected to the real FastAPI endpoints.
 - Local SSH pull and authenticated seed-based neighbor discovery into the existing audit lifecycle, using fixed read-only commands and resolve-then-pin target validation.
 - Operator-approved remediation push with Cisco running-config-only application, Junos confirmed commits, post-change re-pull, and a visible configuration diff.
 - Persistent breadth-first discovery sessions using CDP/LLDP where present and kernel neighbor/ARP evidence as a passive fallback. Eligible advertised neighbors can be processed automatically; evidence-only candidates pause for their missing fixed profile and credentials before entering the existing audit pipeline.
+- Durable device registry with audit history, baseline selection, deterministic control/raw-config drift, and latest-audit fleet summaries.
+- Process liveness and dependency readiness endpoints, configurable Celery concurrency, and healthchecked Compose services.
+- Opt-in Fernet-encrypted device credentials for manual SSH pulls, with owner scoping and append-only access events. The vault is disabled by default.
 
 The non-CIS catalogues are representative technical control mappings for a demonstration. They are not full certification or accreditation coverage.
 
@@ -55,8 +58,16 @@ For any exposed or authenticated deployment, replace `POSTGRES_PASSWORD` and `SE
 - `POST /api/configs/discovery-sessions/{id}/devices/{device_id}/skip` — mark passive host evidence as not a router for this session.
 - `POST /api/configs/{id}/findings/{finding_id}/approve-remediation` — freeze the existing remediation text after operator review.
 - `POST /api/configs/{id}/findings/{finding_id}/apply-remediation` — apply only that approved text and return before/after snapshots and a unified diff.
+- `GET /api/devices` and `GET/PATCH /api/devices/{id}` — paginated owned inventory, current score, metadata, and decommissioning.
+- `GET /api/devices/{id}/history` — every linked configuration audit without deleting decommissioned-device history.
+- `POST /api/devices/{id}/baseline` and `GET /api/devices/{id}/drift` — completed-audit baseline selection and deterministic drift.
+- `GET /api/fleet/summary` — active-device status, latest-completed score distribution, failing controls, and stale devices.
+- `GET /health` and `GET /ready` — process liveness and bounded DB/Redis/Ollama dependency checks.
+- `POST/GET /api/devices/{id}/credentials` and `DELETE /api/devices/{id}/credentials/{credential_id}` — opt-in credential storage, metadata listing, and revocation; plaintext is never returned.
 
-Device SSH endpoints are available only in local single-operator mode and return `403` when `REQUIRE_AUTH=true`. SSH passwords are request-only and are never stored. Cisco push changes running configuration only; startup persistence remains a separate manual action. Junos uses `commit confirmed 5`, verifies reachability, then commits permanently. Risky generic/UCI changes are always refused because no automatic rollback is available.
+Request-supplied device credentials remain request-only and are never stored. Under `REQUIRE_AUTH=true`, pull and discovery require the authenticated device owner; remediation approval and PUSH remain local-only. Cisco push changes running configuration only; startup persistence remains a separate manual action. Junos uses `commit confirmed 5`, verifies reachability, then commits permanently. Risky generic/UCI changes are always refused because no automatic rollback is available.
+
+The credential vault remains unavailable unless `ENABLE_CREDENTIAL_VAULT=true` and uses a dedicated `CREDENTIAL_VAULT_KEY`; it never reuses `SECRET_KEY`. With authentication enabled, P1-1 network pulls and discovery are limited to the user UUID currently stored in `Device.org_id`, with an unowned device claimed by its first authenticated accessor. This is a temporary ownership boundary pending the separately reviewed Organizations/Roles work. Remediation PUSH remains local-only in this pass.
 
 Lifecycle: `queued → normalising → awaiting_training → compliance_check → complete`. Dispatch or processing errors become `failed` and are surfaced in the API/logs.
 
@@ -77,8 +88,6 @@ cd ..
 docker compose config
 ```
 
-The retained tests are Valsec tests. Scanner-specific test modules and tooling are not part of this repository.
-
 ## Demo flow
 
 1. Upload the hardened and vulnerable Cisco samples from `backend/tests/sample_configs/`.
@@ -88,5 +97,6 @@ The retained tests are Valsec tests. Scanner-specific test modules and tooling a
 5. Upload the same syntax for the same vendor again to demonstrate confirmed learned-mapping reuse.
 6. For a direct LAN audit, use **Pull Configuration**. For the validated OpenWrt/Cirotech neighbor demo, follow [the two-router discovery runbook](docs/DEMO_SETUP.md): it recreates the temporary Ubuntu bridge, starts one persisted discovery session, discovers Cirotech from OpenWrt's kernel neighbor evidence, asks only for the missing Cirotech profile/credentials, and pulls its read-only `mib all` dump. The operator never re-enters Router 2's address.
 7. For a failed finding on an SSH-supported device, review and approve its exact remediation, enter request-only SSH credentials, apply it, and inspect the returned before/after diff. Risky changes require care and recovery access.
+8. Open `/devices` after two audits of the same upload name or management address to view its history, choose a completed baseline, and inspect deterministic drift.
 
-See [AI_HANDOFF.md](AI_HANDOFF.md) for verified results and limitations and [TEAM_FILE_OWNERSHIP.md](TEAM_FILE_OWNERSHIP.md) for team ownership.
+See [AI_HANDOFF.md](AI_HANDOFF.md) for verified results and limitations. Contribution ownership is defined by [`.github/CODEOWNERS`](.github/CODEOWNERS).

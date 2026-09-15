@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from config import settings
 from compliance.catalogues import FRAMEWORKS, get_framework_metadata
 from database import get_db
+from device_registry import link_if_database_session
 from models import ComplianceResult, Config, ConfigStatus, NormalizedFinding, Report
 from reports.compliance_generator import compliance_safe_filename
 from input_validation import validate_device_name
@@ -302,6 +303,10 @@ def upload_config(
                 detail="Fortinet FortiOS currently supports nist_sp_800_53_rev5",
             )
     user = _current_user(http_request, db)
+    organization_id = None
+    if user is not None:
+        from organization_access import personal_organization
+        organization_id = personal_organization(db, user).id
     configs = []
     for text, derived_name, source_name in entries:
         detected_vendor = detect_config_vendor(text)
@@ -328,6 +333,7 @@ def upload_config(
             status=ConfigStatus.queued,
             user_id=user.id if user else None,
         )
+        link_if_database_session(db, config, org_id=organization_id)
         configs.append(config)
     dispatch_errors = persist_and_dispatch_configs(db, configs)
     responses = [
@@ -335,6 +341,7 @@ def upload_config(
             "config_id": config.id, "status": config.status.value,
             "device_name": config.device_name, "vendor": config.vendor,
             "os_type": config.os_type, "selected_framework": config.selected_framework,
+            "device_id": config.device_id,
         }
         for config in configs
     ]
@@ -368,6 +375,7 @@ def list_configs(
     configs = query.order_by(Config.uploaded_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
     return {"items": [{
         "id": config.id, "device_name": config.device_name, "vendor": config.vendor,
+        "device_id": config.device_id,
         "os_type": config.os_type, "selected_framework": config.selected_framework,
         "framework_label": get_framework_metadata(config.selected_framework, config.vendor).label,
         "status": config.status.value,
@@ -385,6 +393,7 @@ def config_status(config_id: UUID, http_request: Request, db: Session = Depends(
         NormalizedFinding.confidence.in_(["probable", "unverified"]),
     ).count()
     return {"config_id": config.id, "status": config.status.value,
+            "device_id": config.device_id,
             "vendor": config.vendor, "os_type": config.os_type,
             "selected_framework": config.selected_framework,
             "framework_label": get_framework_metadata(config.selected_framework, config.vendor).label,
@@ -401,6 +410,7 @@ def config_results(config_id: UUID, http_request: Request, db: Session = Depends
         if result.verdict.value == "FAIL":
             severity_counts[result.severity.value] += 1
     return {"config_id": config.id, "status": config.status.value,
+            "device_id": config.device_id,
             "vendor": config.vendor, "os_type": config.os_type,
             "selected_framework": config.selected_framework,
             "framework_label": get_framework_metadata(config.selected_framework, config.vendor).label,
