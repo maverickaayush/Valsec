@@ -18,8 +18,8 @@ if config.config_file_name is not None:
 
 # Override alembic.ini's static sqlalchemy.url with the app's own env-driven
 # DATABASE_URL (config.py / .env), so migrations always target the same DB
-# the app connects to — critical in Docker, where the ini's hardcoded
-# 'localhost' would never reach the 'postgres' service.
+# the app connects to (critical in Docker, where the ini's hardcoded
+# 'localhost' would never reach the 'postgres' service).
 config.set_main_option('sqlalchemy.url', settings.DATABASE_URL)
 
 target_metadata = Base.metadata

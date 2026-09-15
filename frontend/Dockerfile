@@ -1,5 +1,5 @@
 # NOTE: this project's lockfile is package-lock.json (npm), not
-# pnpm-lock.yaml — verified by inspection, not assumed. A pnpm build with
+# pnpm-lock.yaml, verified by inspection, not assumed. A pnpm build with
 # --frozen-lockfile would fail immediately since no pnpm lockfile exists.
 # Pulled from AWS's public ECR mirror of Docker Hub official images to avoid
 # Docker Hub's anonymous pull rate limit failing CI builds (identical image).
@@ -10,7 +10,7 @@ RUN npm ci
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
 # next.config.mjs's rewrites() is evaluated ONCE at `next build` time and
-# baked into routes-manifest.json — NOT re-evaluated per-request at runtime,
+# baked into routes-manifest.json, NOT re-evaluated per-request at runtime,
 # even with output: 'standalone' (verified: a runtime-only `environment:` in
 # docker-compose.yml was silently ignored, proxy kept hitting localhost:8000
 # from inside the container). So the backend URL must be supplied as a build

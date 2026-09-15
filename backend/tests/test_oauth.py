@@ -1,6 +1,6 @@
 """OAuth (Google + GitHub): provider config, state/PKCE, code exchange +
 userinfo normalization, and account-linking upsert. Outbound HTTP is mocked and
-state lives in fakeredis — no network, no live Redis/Postgres."""
+state lives in fakeredis (no network, no live Redis/Postgres)."""
 import json
 import os
 import sys

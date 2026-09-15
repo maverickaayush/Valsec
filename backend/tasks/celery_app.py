@@ -10,7 +10,7 @@ from celery import Celery
 from celery.signals import worker_process_init
 from config import settings, validate_startup_security, ensure_secret_key
 
-# Same secret enforcement as the API entrypoint (main.py) — the worker holds the
+# Same secret enforcement as the API entrypoint (main.py): the worker holds the
 # same DB/Redis credentials, so it must refuse an unsafe production boot too.
 ensure_secret_key()
 validate_startup_security()

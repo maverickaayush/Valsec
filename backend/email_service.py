@@ -1,13 +1,13 @@
 """Email delivery abstraction (auth OTP). Two backends, chosen by
 config.EMAIL_BACKEND:
 
-  'console' — DEV ONLY. Logs the OTP instead of sending. Refused when
+  'console': DEV ONLY. Logs the OTP instead of sending. Refused when
               REQUIRE_AUTH is on unless EMAIL_DEV_CONSOLE_OK is *also* explicitly
               set, so a hosted deployment can never silently print OTPs to logs.
-  'smtp'    — real delivery via stdlib smtplib (STARTTLS), configured entirely
+  'smtp':    real delivery via stdlib smtplib (STARTTLS), configured entirely
               from env (no vendor SDK, no paid dependency).
 
-Auth logic depends only on send_otp_email() — swapping providers is a config
+Auth logic depends only on send_otp_email() - swapping providers is a config
 change, never a code change.
 """
 import logging
@@ -36,7 +36,7 @@ def _send_console(to: str, code: str) -> None:
             "Console email backend is disabled under REQUIRE_AUTH. Configure "
             "EMAIL_BACKEND=smtp (or set EMAIL_DEV_CONSOLE_OK explicitly)."
         )
-    # Dev convenience only — this line is exactly what the production gate above
+    # Dev convenience only: this line is exactly what the production gate above
     # prevents from ever running on a hosted deployment.
     logger.warning("[DEV EMAIL] OTP for %s is %s (expires in %ss)",
                    to, code, settings.OTP_TTL_SECONDS)

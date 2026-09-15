@@ -1,8 +1,8 @@
 """Boot-time secret enforcement (config.validate_startup_security).
 
 The contract: weak secrets only WARN under the self-hosted default posture, but
-are a hard boot failure the moment any production signal is set — so a fresh
-`docker compose up` still boots while a real deployment can't ship a footgun.
+are a hard boot failure the moment any production signal is set, so a fresh
+`docker compose up` still boots while a real deployment cannot ship a footgun.
 """
 import pytest
 

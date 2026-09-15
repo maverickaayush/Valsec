@@ -101,7 +101,7 @@ def generate_otp() -> str:
 def issue_otp(email: str, r: Optional[_redis.Redis] = None) -> str:
     """Mint a fresh code, invalidating any previous one for this email. Returns
     the plaintext code (for the email layer to send). Does NOT enforce cooldown
-    — that's the resend endpoint's job; a first signup should always send."""
+    (that is the resend endpoint's job; a first signup should always send)."""
     r = r or get_redis()
     code = generate_otp()
     key = _otp_key(email)

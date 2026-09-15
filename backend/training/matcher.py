@@ -77,7 +77,7 @@ def resolve_line(
 
     Generates a pattern signature from the raw line and queries the database
     for a prior operator-approved mapping. If found, returns a confirmed finding
-    ready for database persistence. No AI involved — this is pure lookup.
+    ready for database persistence. No AI involved: this is pure lookup.
 
     Args:
         vendor: Device vendor (e.g., 'cisco')
@@ -208,7 +208,7 @@ class DatabaseLearnedMappingResolver:
     """Database-backed implementation of LearnedMappingResolver protocol.
 
     Used by CiscoIOSNormalizer to check persistent learned mappings during
-    parsing. No AI involved — pure database lookup of operator-approved mappings.
+    parsing. No AI involved: pure database lookup of operator-approved mappings.
     """
 
     def __init__(self, db: Session, user_id: UUID | None = None):

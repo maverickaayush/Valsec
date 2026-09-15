@@ -1,5 +1,5 @@
 """OAuth 2.0 (Google + GitHub) for the hosted tier. Reuses the existing Redis
-session + HttpOnly cookie — no JWT. Authorization-code flow, server-side token
+session + HttpOnly cookie (no JWT). Authorization-code flow, server-side token
 exchange + userinfo; state (CSRF) and PKCE (Google) held one-time in Redis.
 Account linking is by VERIFIED email so a user with Google + GitHub + password
 resolves to ONE account. Only exercised when config.REQUIRE_AUTH is True.
@@ -187,7 +187,7 @@ def _github_primary_email(access_token: str, info: dict) -> tuple[Optional[str],
     for e in emails:
         if e.get("verified"):
             return e.get("email"), True
-    if info.get("email"):  # public profile email — treat as unverified
+    if info.get("email"):  # public profile email: treat as unverified
         return info.get("email"), False
     return None, False
 
@@ -195,7 +195,7 @@ def _github_primary_email(access_token: str, info: dict) -> tuple[Optional[str],
 def upsert_oauth_user(db, identity: dict):
     """Resolve the OAuth identity to a single User (account linking), creating or
     linking as needed. Never creates a duplicate. Requires a verified email to
-    create OR link — an unverified provider email can't take over an account.
+    create OR link; an unverified provider email cannot take over an account.
     """
     from models import User, AuthProvider
 

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
-<title>Valsec Compliance Report — {{ device_name }}</title>
+<title>Valsec Compliance Report: {{ device_name }}</title>
 <style>
   :root { --bg:#060807; --panel:#0d120f; --line:#26352b; --green:#00e599; --text:#eef5ef; --muted:#91a096; --red:#ff7676; --amber:#d7b85f; }
   @page {
@@ -104,7 +104,7 @@
         <div class="label">Requirement</div><div>{{ result.requirement }}</div>
         <div class="label">Observed value</div><div class="observed mono">{{ result.observed_value }}</div>
         <div class="label">{{ vendor }} {{ os_type }} remediation</div>
-        {% if result.is_remediation_fallback %}<div class="fallback">AI-generated fallback remediation — operator review required</div>{% endif %}
+        {% if result.is_remediation_fallback %}<div class="fallback">AI-generated fallback remediation: operator review required</div>{% endif %}
         {% if result.remediation_cli %}<div class="remediation mono">{{ result.remediation_cli }}</div>{% else %}<div class="no-remediation">No remediation command is required for this verdict.</div>{% endif %}
       </div>
     </article>

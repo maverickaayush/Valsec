@@ -4,7 +4,7 @@ The routes remain available in local mode, but the Valsec audit APIs only requir
 a session when REQUIRE_AUTH is enabled.
 
 Flow: signup -> email OTP verify -> audit. Sessions are opaque Redis-backed HttpOnly cookies
-(security.py). All error text is generic — no stack traces, no internals.
+(security.py). All error text is generic (no stack traces, no internals).
 """
 import logging
 
@@ -103,7 +103,7 @@ def signup(request: SignupRequest, http_request: Request, db: Session = Depends(
         raise HTTPException(status_code=409, detail="An account with this email already exists.")
 
     if existing:
-        # Abandoned/unverified signup — let them restart with a fresh password.
+        # Abandoned or unverified signup: allow restarting with a fresh password.
         existing.password_hash = security.hash_password(request.password)
         db.commit()
     else:

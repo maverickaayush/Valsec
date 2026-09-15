@@ -123,7 +123,7 @@ class CampaignTargetStatus(str, enum.Enum):
 
 class User(Base):
     """Hosted-tier user account (routers/auth.py). Only used when
-    config.REQUIRE_AUTH is True — a local single-operator deployment has no users.
+    config.REQUIRE_AUTH is True (a local single-operator deployment has no users).
 
     Passwords are Argon2id hashes (security.py); the plaintext is never stored
     or logged. OTP codes and browser sessions live in Redis, not here, so this
@@ -179,7 +179,7 @@ class Membership(Base):
 class AuthProvider(Base):
     """External OAuth identity linked to a User (routers/auth.py + oauth.py).
 
-    A single user may hold several providers PLUS a password — all resolving to
+    A single user may hold several providers PLUS a password, all resolving to
     ONE user via account-linking on a verified email, so no duplicate accounts.
     Password auth is NOT stored here (that's User.password_hash); this table is
     OAuth identities only. Only used when config.REQUIRE_AUTH is True.
