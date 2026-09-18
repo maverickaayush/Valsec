@@ -5,7 +5,7 @@ celery==5.3.6
 redis==5.0.4
 psycopg2-binary==2.9.12
 sqlalchemy>=2.0.36
-alembic==1.13.1
+alembic==1.20.0
 pydantic-settings==2.2.1
 requests==2.33.0
 urllib3==2.7.0
