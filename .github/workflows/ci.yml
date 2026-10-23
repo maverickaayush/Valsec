@@ -26,7 +26,7 @@ jobs:
       DATABASE_URL: postgresql://valsec_ci:valsec_ci_password@127.0.0.1:5432/valsec_ci
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with: {python-version: '3.11'}
       - run: pip install -r backend/requirements.txt -r backend/requirements-dev.txt
       - name: Compile backend
